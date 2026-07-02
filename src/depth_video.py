@@ -13,6 +13,7 @@ from src.utils.common import align_scale_and_shift
 from src.utils.Printer import FontColor
 from src.utils.dyn_uncertainty import mapping_utils as map_utils
 from src.utils.plot_utils import create_gif_from_directory
+from src.utils.omega_prior import OmegaPriorCache
 import matplotlib.pyplot as plt
 import os
 from src.utils.sys_timer import timer
@@ -35,6 +36,7 @@ class DepthVideo:
         buffer = cfg['tracking']['buffer']
         self.printer = printer
         self.metric_depth_reg = cfg['tracking']['backend']['metric_depth_reg']
+        self.omega_prior = OmegaPriorCache(cfg, self.device)
         if not self.metric_depth_reg:
             self.printer.print(f"Metric depth for regularization is not activated.",FontColor.INFO)
             self.printer.print(f"This should not happen for WildGS-SLAM unless you are doing ablation study",FontColor.INFO)
@@ -64,6 +66,8 @@ class DepthVideo:
         self.depth_shift = torch.zeros(buffer,device=self.device, dtype=torch.float).share_memory_()
         self.valid_depth_mask = torch.zeros(buffer, ht, wd, device=self.device, dtype=torch.bool).share_memory_()
         self.valid_depth_mask_small = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.bool).share_memory_()        
+        self.omega_uncertainties = torch.ones(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
+        self.omega_uncertainty_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
@@ -172,6 +176,28 @@ class DepthVideo:
             dino_feats_normalized = F.normalize(self.dino_feats_resize[index], p=2, dim=-3)
             dino_feats_tmp = dino_feats_normalized  # [1, C, H, W]
             C, H, W = dino_feats_tmp.shape[-3:]
+
+        if len(item) > 10 and item[10] is not None:
+            omega_uncertainty = item[10].to(self.device, dtype=torch.float32)
+            if tuple(omega_uncertainty.shape[-2:]) != (self.ht, self.wd):
+                omega_uncertainty = F.interpolate(
+                    omega_uncertainty[None, None],
+                    size=(self.ht, self.wd),
+                    mode='bilinear',
+                    align_corners=False,
+                )[0, 0]
+            omega_uncertainty_small = omega_uncertainty[self.slice_h, self.slice_w]
+            self.omega_uncertainties[index] = omega_uncertainty_small
+            self.omega_uncertainty_valid[index] = True
+            write_to_droid_uncertainty = (
+                self.omega_prior.uncertainty_cfg.get("write_to_droid_uncertainty", False)
+                or self.omega_prior.uncertainty_cfg.get("apply_to") == "droid_uncertainty"
+            )
+            if self.uncertainty_aware and write_to_droid_uncertainty:
+                self.uncertainties[index] = omega_uncertainty_small
+        else:
+            self.omega_uncertainties[index] = 1.0
+            self.omega_uncertainty_valid[index] = False
 
     def __setitem__(self, index, item):
         with self.get_lock():
@@ -339,6 +365,9 @@ class DepthVideo:
 
             target = target.view(-1, self.ht//self.down_scale, self.wd//self.down_scale, 2).permute(0,3,1,2).contiguous()
             weight = weight.view(-1, self.ht//self.down_scale, self.wd//self.down_scale, 2).permute(0,3,1,2).contiguous()
+            weight = self.apply_omega_edge_weight(weight, ii, jj)
+            if self.omega_prior.uncertainty_enabled and self.omega_prior.uncertainty_cfg.get("freeze_droid_uncertainty_update", False):
+                enable_update_uncer = False
 
             # if there is NaN of inf value for self.affine_weights, assert
             if self.uncertainty_aware:
@@ -376,6 +405,20 @@ class DepthVideo:
                     self.debug)          # t0, t1: window of keyframes for BA
             
             self.disps.clamp_(min=1e-5)
+
+    def apply_omega_edge_weight(self, weight, ii, jj):
+        if not self.omega_prior.uncertainty_enabled:
+            return weight
+
+        mode = self.omega_prior.uncertainty_cfg.get("apply_to", "edge_weight")
+        if mode in [False, None, "none", "droid_uncertainty"]:
+            return weight
+
+        source_uncertainty = self.omega_uncertainties[ii]
+        source_valid = self.omega_uncertainty_valid[ii].view(-1, 1, 1)
+        source_weight = self.omega_prior.edge_weight_from_uncertainty(source_uncertainty)
+        source_weight = torch.where(source_valid, source_weight, torch.ones_like(source_weight))
+        return (weight * source_weight[:, None]).contiguous()
 
     @torch.no_grad()
     def visualize_uncertainty(self, target, weight, ii, jj, frame_choice="nearest", mode="Before"):

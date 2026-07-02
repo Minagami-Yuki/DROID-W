@@ -205,6 +205,8 @@ class FactorGraph:
             # self.video.mono_disps_mask_up[ix] = self.video.mono_disps_mask_up[ix+1]
             self.video.valid_depth_mask[ix] = self.video.valid_depth_mask[ix+1]
             self.video.valid_depth_mask_small[ix] = self.video.valid_depth_mask_small[ix+1]
+            self.video.omega_uncertainties[ix] = self.video.omega_uncertainties[ix+1]
+            self.video.omega_uncertainty_valid[ix] = self.video.omega_uncertainty_valid[ix+1]
 
             self.video.nets[ix] = self.video.nets[ix+1]
             self.video.inps[ix] = self.video.inps[ix+1]

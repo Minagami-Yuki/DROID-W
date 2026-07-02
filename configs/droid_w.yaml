@@ -79,7 +79,7 @@ mapping:
     uncer_depth_mult: 0.2
 
 tracking:
-  pretrained: ./pretrained/droid.pth
+  pretrained: /home/czy/FanZhu/DROID-Splat/pretrained/droid.pth
   buffer: 350     # maximum number of keyframes that can be stored
   beta: 0.75      # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel
   warmup: 12       # use the first X keyframes for bootstrapping the tracker
@@ -155,6 +155,33 @@ mono_prior:
   save_depth: False
   feature_extractor: 'dinov2_reg_small_fine' 
   save_feature: False
+
+omega_prior:
+  enable: False
+  cache_dir: null
+  missing_policy: warn # warn | ignore | error
+  depth:
+    enable: False
+    mode: replace # replace | blend
+    blend_alpha: 1.0
+    scale: 1.0
+    min_depth: 0.0001
+    max_depth: null
+  uncertainty:
+    enable: False
+    apply_to: edge_weight # edge_weight | droid_uncertainty | none
+    normalize_confidence: True
+    min_confidence: 0.0
+    certain_value: 0.78
+    uncertain_value: 1.0
+    min_value: 0.1
+    max_value: 10.0
+    missing_value: 1.0
+    droid_scale: 45.0
+    droid_shift: 35.0
+    droid_min_scale: 0.1
+    write_to_droid_uncertainty: False
+    freeze_droid_uncertainty_update: False
 
 data:
   output: ./output/wildgs_slam

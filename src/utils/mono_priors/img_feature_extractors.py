@@ -16,7 +16,37 @@ as it will cause errors in multipprocessing setup of the SLAM system
 class Fit3DModels(torch.nn.Module):
     def __init__(self, extractor_model, device):
         super().__init__()
-        self.model = torch.hub.load("ywyue/FiT3D", extractor_model).to(device).eval()
+        #self.model = torch.hub.load("ywyue/FiT3D", extractor_model).to(device).eval()
+        self.model = torch.hub.load("/home/czy/.cache/torch/hub/ywyue_FiT3D_main", extractor_model, source='local').to(device).eval()
+        # 找到这一行左右的代码：
+
+        # 修改为以下逻辑：
+        # import torch
+        # from thirdparty.FiT3D.models.builder import build_model # 确保路径正确
+
+        # # 1. 定义模型配置（根据你使用的具体模型，这里以 DINO 为例）
+        # # 如果 FiT3D 的源码已经在你的 thirdparty 里，可以直接调用
+        # checkpoint_path = "/home/czy/.cache/torch/hub/checkpoints/metric_depth_vit_large_800k.pth"
+
+        # # 2. 绕过联网，直接加载
+        # # 注意：如果你之前已经运行过一次，torch.hub 可能已经在本地创建了源码缓存
+        # # 我们利用本地源码加载
+        # self.model = torch.hub.load(
+        #     '/home/czy/.cache/torch/hub/ywyue_FiT3D_main', # 刚才报错信息里的缓存路径
+        #     extractor_model, 
+        #     source='local', 
+        #     pretrained=False # 先不让它自动下载
+        # ).to(device)
+
+        # # 3. 手动加载你下载好的 .pth
+        # state_dict = torch.load(checkpoint_path, map_location=device)
+        # if 'model' in state_dict: # 有些模型权重包在 'model' 键下面
+        #     self.model.load_state_dict(state_dict['model'])
+        # else:
+        #     self.model.load_state_dict(state_dict)
+
+        self.model.eval()
+
 
     def get_intermediate_layers(
         self,

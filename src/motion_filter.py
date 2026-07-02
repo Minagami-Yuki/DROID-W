@@ -6,6 +6,7 @@ from src.modules.droid_net import CorrBlock
 from src.utils.mono_priors.metric_depth_estimators import get_metric_depth_estimator, predict_metric_depth
 from src.utils.datasets import load_metric_depth, load_img_feature
 from src.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
+from src.utils.omega_prior import OmegaPriorCache
 
 class MotionFilter:
     """ This class is used to filter incoming frames and extract features 
@@ -32,6 +33,7 @@ class MotionFilter:
         self.uncertainty_aware = cfg['tracking']["uncertainty_params"]['activate']
         self.save_dir = cfg['data']['output'] + '/' + cfg['scene']
         self.metric_depth_estimator = get_metric_depth_estimator(cfg)
+        self.omega_prior = OmegaPriorCache(cfg, device)
         if cfg['mapping']["uncertainty_params"]['activate']:
             # If mapping needs dino features, we still need feature extractor
             self.feat_extractor = get_feature_extractor(cfg)
@@ -46,6 +48,21 @@ class MotionFilter:
     def __feature_encoder(self, image):
         """ features for correlation volume """
         return self.fnet(image).squeeze(0)
+
+    def _apply_omega_prior(self, tstamp, mono_depth, image):
+        image_hw = tuple(image.shape[-2:])
+        omega_depth, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
+
+        if omega_depth is not None:
+            mode = self.omega_prior.depth_cfg.get("mode", "replace")
+            if mode == "blend":
+                alpha = float(self.omega_prior.depth_cfg.get("blend_alpha", 1.0))
+                valid = omega_depth > 0
+                mono_depth = torch.where(valid, alpha * omega_depth + (1.0 - alpha) * mono_depth, mono_depth)
+            else:
+                mono_depth = torch.where(omega_depth > 0, omega_depth, mono_depth)
+
+        return mono_depth, omega_uncertainty
 
     @torch.amp.autocast('cuda',enabled=True)
     @torch.no_grad()
@@ -70,6 +87,7 @@ class MotionFilter:
             net, inp = self.__context_encoder(inputs[:,[0]])
             self.net, self.inp, self.fmap = net, inp, gmap
             mono_depth = predict_metric_depth(self.metric_depth_estimator,tstamp,image,self.cfg,self.device,save_depth=(self.cfg['mono_prior']['save_depth'] or self.cfg['mapping']["enable"]))
+            mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
             if self.uncertainty_aware:
                 dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
             else:
@@ -77,7 +95,7 @@ class MotionFilter:
                 if self.cfg['mapping']["uncertainty_params"]['activate']:
                     # If mapping needs dino features, we predict here and store the value in local disk
                     _ = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=True)
-            self.video.append(tstamp, image[0], Id, 1.0, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0,0], inp[0,0], dino_features)
+            self.video.append(tstamp, image[0], Id, 1.0, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0,0], inp[0,0], dino_features, omega_uncertainty)
         ### only add new frame if there is enough motion ###
         else:                
             # index correlation volume
@@ -99,6 +117,7 @@ class MotionFilter:
                 net, inp = self.__context_encoder(inputs[:,[0]])
                 self.net, self.inp, self.fmap = net, inp, gmap
                 mono_depth = predict_metric_depth(self.metric_depth_estimator,tstamp,image,self.cfg,self.device,save_depth=(self.cfg['mono_prior']['save_depth'] or self.cfg['mapping']["enable"]))
+                mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
                 if self.uncertainty_aware:
                     dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
                 else:
@@ -107,7 +126,7 @@ class MotionFilter:
                         # if mapping needs dino features, we predict here and store the value in local disk
                         _ = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=True)
                 # add new frame to video, all params
-                self.video.append(tstamp, image[0], None, None, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0], inp[0], dino_features)     # video.counter += 1
+                self.video.append(tstamp, image[0], None, None, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0], inp[0], dino_features, omega_uncertainty)     # video.counter += 1
                 # gmap: torch.Size([1, 128, 45, 80]) net[0]: [128, 45, 80] inp: [1, 128, 45, 80], dino_features: [25, 45, 384]
             else:
                 self.count += 1
