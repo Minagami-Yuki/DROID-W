@@ -215,6 +215,12 @@ edge_dtf_prior:
     omega_max_uncertainty: 0.86
     droid_uncertainty: False
     droid_max_uncertainty: 0.90
+  cycle_consistency:
+    enable: False
+    max_asymmetry: 0.08
+    min_mean_residual: 0.0
+    max_mean_residual: 1.0
+    min_edge_mass: 16.0
 
 data:
   output: ./output/wildgs_slam

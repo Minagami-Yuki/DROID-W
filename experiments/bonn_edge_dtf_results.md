@@ -32,6 +32,16 @@ source_edge = Edge_i(p) * 1[OmegaUncertainty_i(p) <= threshold]
 
 The gate is disabled by default and only enabled in the `_ogate086` configs.
 
+Cycle-consistent Edge-DTF adds a pair-level selector:
+
+```text
+mean_fwd = mean(Edge_i(p) * DTF_j(project_i_to_j(p))) / mean(Edge_i(p))
+mean_rev = mean(Edge_j(p) * DTF_i(project_j_to_i(p))) / mean(Edge_j(p))
+use_edge_dtf(i, j) = 1[abs(mean_fwd - mean_rev) <= max_asymmetry]
+```
+
+An optional `min_mean_residual` keeps only bidirectional high-residual edge factors. This is disabled by default and only used in the `_min004` config.
+
 ## Commands
 
 ```bash
@@ -41,6 +51,9 @@ conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_ome
 conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_edge_dtf015_ogate086.yaml
 conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_ogate086.yaml
 conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf005_ogate086.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_edge_dtf015_cycle008.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008_min004.yaml
 ```
 
 Configs:
@@ -51,6 +64,9 @@ Configs:
 - `configs/Dynamic/Bonn/bonn_person_tracking_omega_edge_dtf015_ogate086.yaml`
 - `configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_ogate086.yaml`
 - `configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf005_ogate086.yaml`
+- `configs/Dynamic/Bonn/bonn_person_tracking_omega_edge_dtf015_cycle008.yaml`
+- `configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008.yaml`
+- `configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008_min004.yaml`
 
 ## Results
 
@@ -62,12 +78,15 @@ ATE RMSE in meters.
 | bonn_person_tracking | Omega best | 0.033721 | 0.033778 | 0.028989 | 0.028649 |
 | bonn_person_tracking | Omega + Edge-DTF 0.15 | 0.033500 | 0.033652 | 0.028925 | 0.028662 |
 | bonn_person_tracking | Omega + Edge-DTF 0.15 + Omega gate 0.86 | 0.033553 | 0.033661 | 0.028957 | 0.028647 |
+| bonn_person_tracking | Omega + Edge-DTF 0.15 + cycle asym 0.08 | 0.033618 | 0.033792 | 0.028959 | 0.028715 |
 | bonn_crowd2 | DROID-W | 0.019121 | 0.018004 | 0.016788 | 0.015895 |
 | bonn_crowd2 | Omega best | 0.018728 | 0.017846 | 0.016978 | 0.016107 |
 | bonn_crowd2 | Omega + Edge-DTF 0.15 | 0.019635 | 0.018819 | 0.017720 | 0.016868 |
 | bonn_crowd2 | Omega + Edge-DTF 0.05 | 0.019381 | 0.018554 | 0.017543 | 0.016719 |
 | bonn_crowd2 | Omega + Edge-DTF 0.15 + Omega gate 0.86 | 0.019554 | 0.018706 | 0.017664 | 0.016822 |
 | bonn_crowd2 | Omega + Edge-DTF 0.05 + Omega gate 0.86 | 0.019548 | 0.018474 | 0.017724 | 0.016646 |
+| bonn_crowd2 | Omega + Edge-DTF 0.15 + cycle asym 0.08 | 0.019146 | 0.018214 | 0.017333 | 0.016393 |
+| bonn_crowd2 | Omega + Edge-DTF 0.15 + cycle asym 0.08 + min residual 0.04 | 0.019533 | 0.018205 | 0.017005 | 0.016030 |
 
 Delta versus Omega best:
 
@@ -75,10 +94,13 @@ Delta versus Omega best:
 | --- | --- | ---: | ---: |
 | bonn_person_tracking | Omega + Edge-DTF 0.15 | -0.000221 | -0.000126 |
 | bonn_person_tracking | Omega + Edge-DTF 0.15 + Omega gate 0.86 | -0.000168 | -0.000116 |
+| bonn_person_tracking | Omega + Edge-DTF 0.15 + cycle asym 0.08 | -0.000103 | +0.000014 |
 | bonn_crowd2 | Omega + Edge-DTF 0.15 | +0.000907 | +0.000973 |
 | bonn_crowd2 | Omega + Edge-DTF 0.05 | +0.000653 | +0.000708 |
 | bonn_crowd2 | Omega + Edge-DTF 0.15 + Omega gate 0.86 | +0.000826 | +0.000860 |
 | bonn_crowd2 | Omega + Edge-DTF 0.05 + Omega gate 0.86 | +0.000820 | +0.000628 |
+| bonn_crowd2 | Omega + Edge-DTF 0.15 + cycle asym 0.08 | +0.000418 | +0.000368 |
+| bonn_crowd2 | Omega + Edge-DTF 0.15 + cycle asym 0.08 + min residual 0.04 | +0.000805 | +0.000359 |
 
 ## Interpretation
 
@@ -87,7 +109,11 @@ Delta versus Omega best:
 - Omega uncertainty gating is a useful safety mechanism but not enough for crowded dynamic scenes:
   - `person_tracking` remains better than Omega best, but the ungated Edge-DTF 0.15 variant is still the best tested setting.
   - `crowd2` improves slightly versus ungated Edge-DTF, but remains worse than Omega best.
-- The next useful version should add a stronger motion/static selector, for example suppressing edges whose forward/backward Edge-DTF residual is not cycle-consistent, or applying Edge-DTF only to low-motion/background regions.
+- Cycle-consistent Edge-DTF is a better selector than Omega uncertainty gating for crowded scenes:
+  - `crowd2` full RMSE improves from ungated `0.018819` and Omega-gated `0.018706` to `0.018214`.
+  - It still does not beat Omega best `0.017846`, so the current pair-level selector is useful but insufficient.
+  - `person_tracking` loses the previous Edge-DTF gain, suggesting that pair-level cycle gating is too coarse for single-person dynamic scenes.
+- `min_mean_residual=0.04` gives nearly identical `crowd2` full RMSE but worse KF RMSE, so the plain cycle asymmetry config is the more stable setting among these tests.
 
 ## Metric Files
 
@@ -103,3 +129,9 @@ Delta versus Omega best:
 - `Outputs/Bonn/bonn_crowd2_omega_edge_dtf015_ogate086/traj/metrics_full_traj.txt`
 - `Outputs/Bonn/bonn_crowd2_omega_edge_dtf005_ogate086/traj/metrics_kf_traj.txt`
 - `Outputs/Bonn/bonn_crowd2_omega_edge_dtf005_ogate086/traj/metrics_full_traj.txt`
+- `Outputs/Bonn/bonn_person_tracking_omega_edge_dtf015_cycle008/traj/metrics_kf_traj.txt`
+- `Outputs/Bonn/bonn_person_tracking_omega_edge_dtf015_cycle008/traj/metrics_full_traj.txt`
+- `Outputs/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008/traj/metrics_kf_traj.txt`
+- `Outputs/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008/traj/metrics_full_traj.txt`
+- `Outputs/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008_min004/traj/metrics_kf_traj.txt`
+- `Outputs/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008_min004/traj/metrics_full_traj.txt`

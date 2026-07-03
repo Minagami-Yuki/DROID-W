@@ -459,24 +459,13 @@ class DepthVideo:
             return weight
 
         coords, valid_mask = self.reproject(ii, jj)
-        coords = coords.squeeze(0)
-        valid_mask = valid_mask.squeeze(0).squeeze(-1).bool()
-
-        target_dtf = self.edge_dtf_maps[jj].unsqueeze(1)
-        sampled_dtf, sample_valid = self.project_images_with_mask(target_dtf, coords, valid_mask)
-        sampled_dtf = sampled_dtf.squeeze(1)
-
-        valid_pair = (self.edge_dtf_valid[ii] & self.edge_dtf_valid[jj]).view(-1, 1, 1)
-        residual_dtf = torch.where(
-            sample_valid & valid_pair,
-            sampled_dtf,
-            torch.zeros_like(sampled_dtf),
+        source_edge, residual_dtf = self.edge_dtf_residual_from_coords(
+            ii,
+            jj,
+            coords,
+            valid_mask=valid_mask,
         )
-        source_edge = torch.where(
-            valid_pair,
-            self.edge_dtf_edges[ii] * self.edge_dtf_static_gate(ii),
-            torch.zeros_like(residual_dtf),
-        )
+        source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf)
         edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
         return (weight * edge_weight[:, None]).contiguous()
 
@@ -484,9 +473,17 @@ class DepthVideo:
         if not self.edge_dtf_prior.enabled:
             return torch.ones_like(coords[..., :1])
 
+        source_edge, residual_dtf = self.edge_dtf_residual_from_coords(ii, jj, coords)
+        source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf)
+        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
+        return edge_weight[None, ..., None].contiguous()
+
+    def edge_dtf_residual_from_coords(self, ii, jj, coords, valid_mask=None):
         coords_ = coords.squeeze(0)
         target_dtf = self.edge_dtf_maps[jj].unsqueeze(1)
-        sampled_dtf, sample_valid = self.project_images_with_mask(target_dtf, coords_)
+        if valid_mask is not None:
+            valid_mask = valid_mask.squeeze(0).squeeze(-1).bool()
+        sampled_dtf, sample_valid = self.project_images_with_mask(target_dtf, coords_, valid_mask)
         sampled_dtf = sampled_dtf.squeeze(1)
 
         valid_pair = (self.edge_dtf_valid[ii] & self.edge_dtf_valid[jj]).view(-1, 1, 1)
@@ -500,8 +497,45 @@ class DepthVideo:
             self.edge_dtf_edges[ii] * self.edge_dtf_static_gate(ii),
             torch.zeros_like(residual_dtf),
         )
-        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
-        return edge_weight[None, ..., None].contiguous()
+        return source_edge, residual_dtf
+
+    def apply_edge_dtf_cycle_gate(self, ii, jj, source_edge, residual_dtf):
+        cycle_cfg = self.edge_dtf_prior.cfg.get("cycle_consistency", {}) or {}
+        if not bool(cycle_cfg.get("enable", False)):
+            return source_edge
+
+        reverse_coords, reverse_valid = self.reproject(jj, ii)
+        reverse_edge, reverse_dtf = self.edge_dtf_residual_from_coords(
+            jj,
+            ii,
+            reverse_coords,
+            valid_mask=reverse_valid,
+        )
+
+        fwd_mean, fwd_mass = self.edge_dtf_mean_residual(source_edge, residual_dtf)
+        rev_mean, rev_mass = self.edge_dtf_mean_residual(reverse_edge, reverse_dtf)
+
+        max_asym = float(cycle_cfg.get("max_asymmetry", 0.08))
+        min_residual = float(cycle_cfg.get("min_mean_residual", 0.0))
+        max_residual = float(cycle_cfg.get("max_mean_residual", 1.0))
+        min_edge_mass = float(cycle_cfg.get("min_edge_mass", 16.0))
+
+        pair_static = (
+            (torch.abs(fwd_mean - rev_mean) <= max_asym)
+            & (fwd_mean >= min_residual)
+            & (rev_mean >= min_residual)
+            & (fwd_mean <= max_residual)
+            & (rev_mean <= max_residual)
+            & (fwd_mass >= min_edge_mass)
+            & (rev_mass >= min_edge_mass)
+        )
+        return source_edge * pair_static.to(source_edge.dtype).view(-1, 1, 1)
+
+    def edge_dtf_mean_residual(self, source_edge, residual_dtf):
+        edge_mass = source_edge.sum(dim=(1, 2))
+        residual_sum = (source_edge * residual_dtf).sum(dim=(1, 2))
+        mean_residual = residual_sum / edge_mass.clamp(min=1e-6)
+        return mean_residual, edge_mass
 
     def edge_dtf_static_gate(self, ii):
         gate_cfg = self.edge_dtf_prior.cfg.get("gate", {}) or {}
