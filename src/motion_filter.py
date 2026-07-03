@@ -76,17 +76,28 @@ class MotionFilter:
     def _apply_omega_prior(self, tstamp, mono_depth, image):
         image_hw = tuple(image.shape[-2:])
         omega_cfg = self.cfg.get('omega_prior', {}) or {}
+        depth_cfg = omega_cfg.get('depth', {}) or {}
+        uncertainty_cfg = omega_cfg.get('uncertainty', {}) or {}
+        depth_enabled = bool(omega_cfg.get('enable', False) and depth_cfg.get('enable', False))
+        uncertainty_enabled = bool(omega_cfg.get('enable', False) and uncertainty_cfg.get('enable', False))
         source = omega_cfg.get('source', 'cache')
         if source == 'auto':
             source = 'cache' if omega_cfg.get('cache_dir') else 'model'
 
-        if source in ['model', 'online']:
+        omega_depth = None
+        omega_uncertainty = None
+        if source in ['model', 'online'] and (depth_enabled or uncertainty_enabled):
             omega_depth, omega_confidence = self.omega_predictor.predict_frame(image)
-            omega_uncertainty = self.omega_prior.confidence_to_uncertainty(omega_confidence)
+            if uncertainty_enabled:
+                omega_uncertainty = self.omega_prior.confidence_to_uncertainty(omega_confidence)
         else:
             omega_depth, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
+            if not depth_enabled:
+                omega_depth = None
+            if not uncertainty_enabled:
+                omega_uncertainty = None
 
-        if omega_depth is not None:
+        if depth_enabled and omega_depth is not None:
             mode = self.omega_prior.depth_cfg.get("mode", "replace")
             if mode == "blend":
                 alpha = float(self.omega_prior.depth_cfg.get("blend_alpha", 1.0))
