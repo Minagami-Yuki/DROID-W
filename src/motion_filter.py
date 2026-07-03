@@ -7,6 +7,7 @@ from src.utils.mono_priors.metric_depth_estimators import get_metric_depth_estim
 from src.utils.datasets import load_metric_depth, load_img_feature
 from src.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
 from src.utils.omega_prior import OmegaPriorCache
+from src.utils.omega_predictor import OmegaOnlinePredictor
 
 class MotionFilter:
     """ This class is used to filter incoming frames and extract features 
@@ -32,8 +33,10 @@ class MotionFilter:
         
         self.uncertainty_aware = cfg['tracking']["uncertainty_params"]['activate']
         self.save_dir = cfg['data']['output'] + '/' + cfg['scene']
-        self.metric_depth_estimator = get_metric_depth_estimator(cfg)
         self.omega_prior = OmegaPriorCache(cfg, device)
+        self.omega_predictor = OmegaOnlinePredictor(cfg, device)
+        self.use_metric_depth_estimator = self._should_use_metric_depth_estimator()
+        self.metric_depth_estimator = get_metric_depth_estimator(cfg) if self.use_metric_depth_estimator else None
         if cfg['mapping']["uncertainty_params"]['activate']:
             # If mapping needs dino features, we still need feature extractor
             self.feat_extractor = get_feature_extractor(cfg)
@@ -49,9 +52,39 @@ class MotionFilter:
         """ features for correlation volume """
         return self.fnet(image).squeeze(0)
 
+    def _should_use_metric_depth_estimator(self):
+        omega_cfg = self.cfg.get('omega_prior', {}) or {}
+        depth_cfg = omega_cfg.get('depth', {}) or {}
+        if not omega_cfg.get('enable', False) or not depth_cfg.get('enable', False):
+            return True
+        if depth_cfg.get('mode', 'replace') != 'replace':
+            return True
+        return bool(depth_cfg.get('fallback_to_mono', False))
+
+    def _predict_depth_prior(self, tstamp, image):
+        if self.use_metric_depth_estimator:
+            return predict_metric_depth(
+                self.metric_depth_estimator,
+                tstamp,
+                image,
+                self.cfg,
+                self.device,
+                save_depth=(self.cfg['mono_prior']['save_depth'] or self.cfg['mapping']["enable"]),
+            )
+        return torch.zeros(image.shape[-2:], device=self.device, dtype=torch.float32)
+
     def _apply_omega_prior(self, tstamp, mono_depth, image):
         image_hw = tuple(image.shape[-2:])
-        omega_depth, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
+        omega_cfg = self.cfg.get('omega_prior', {}) or {}
+        source = omega_cfg.get('source', 'cache')
+        if source == 'auto':
+            source = 'cache' if omega_cfg.get('cache_dir') else 'model'
+
+        if source in ['model', 'online']:
+            omega_depth, omega_confidence = self.omega_predictor.predict_frame(image)
+            omega_uncertainty = self.omega_prior.confidence_to_uncertainty(omega_confidence)
+        else:
+            omega_depth, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
 
         if omega_depth is not None:
             mode = self.omega_prior.depth_cfg.get("mode", "replace")
@@ -86,7 +119,7 @@ class MotionFilter:
         if self.video.counter.value == 0:
             net, inp = self.__context_encoder(inputs[:,[0]])
             self.net, self.inp, self.fmap = net, inp, gmap
-            mono_depth = predict_metric_depth(self.metric_depth_estimator,tstamp,image,self.cfg,self.device,save_depth=(self.cfg['mono_prior']['save_depth'] or self.cfg['mapping']["enable"]))
+            mono_depth = self._predict_depth_prior(tstamp, image)
             mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
             if self.uncertainty_aware:
                 dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
@@ -116,7 +149,7 @@ class MotionFilter:
                 self.count = 0
                 net, inp = self.__context_encoder(inputs[:,[0]])
                 self.net, self.inp, self.fmap = net, inp, gmap
-                mono_depth = predict_metric_depth(self.metric_depth_estimator,tstamp,image,self.cfg,self.device,save_depth=(self.cfg['mono_prior']['save_depth'] or self.cfg['mapping']["enable"]))
+                mono_depth = self._predict_depth_prior(tstamp, image)
                 mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
                 if self.uncertainty_aware:
                     dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])

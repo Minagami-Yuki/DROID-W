@@ -36,12 +36,12 @@ class DepthVideo:
         buffer = cfg['tracking']['buffer']
         self.printer = printer
         self.metric_depth_reg = cfg['tracking']['backend']['metric_depth_reg']
-        self.omega_prior = OmegaPriorCache(cfg, self.device)
         if not self.metric_depth_reg:
             self.printer.print(f"Metric depth for regularization is not activated.",FontColor.INFO)
             self.printer.print(f"This should not happen for WildGS-SLAM unless you are doing ablation study",FontColor.INFO)
         self.mono_thres = cfg['tracking']['mono_thres']
         self.device = cfg['device']
+        self.omega_prior = OmegaPriorCache(cfg, self.device)
         self.down_scale = 8
         self.slice_h = slice(self.down_scale // 2 - 1, ht//self.down_scale*self.down_scale+1, self.down_scale)
         self.slice_w = slice(self.down_scale // 2 - 1, wd//self.down_scale*self.down_scale+1, self.down_scale)

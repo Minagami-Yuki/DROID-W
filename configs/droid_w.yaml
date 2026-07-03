@@ -158,12 +158,14 @@ mono_prior:
 
 omega_prior:
   enable: False
+  source: cache # cache | model | auto
   cache_dir: null
   missing_policy: warn # warn | ignore | error
   depth:
     enable: False
     mode: replace # replace | blend
     blend_alpha: 1.0
+    fallback_to_mono: True
     scale: 1.0
     min_depth: 0.0001
     max_depth: null
@@ -182,6 +184,13 @@ omega_prior:
     droid_min_scale: 0.1
     write_to_droid_uncertainty: False
     freeze_droid_uncertainty_update: False
+  model:
+    repo_path: thirdparty/vggt-omega
+    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    image_resolution: 512
+    preprocess_mode: balanced # balanced | max_size
+    patch_size: 16
+    device: null
 
 data:
   output: ./output/wildgs_slam

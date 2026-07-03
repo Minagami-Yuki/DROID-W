@@ -91,6 +91,9 @@ class OmegaPriorCache:
         )
         return torch.clamp(1.0 / scale, 0.0, 1.0)
 
+    def confidence_to_uncertainty(self, confidence: torch.Tensor) -> torch.Tensor:
+        return self._confidence_to_uncertainty(confidence)
+
     def _confidence_to_uncertainty(self, confidence: torch.Tensor) -> torch.Tensor:
         conf = confidence.float()
         if bool(self.uncertainty_cfg.get("normalize_confidence", True)):

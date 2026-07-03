@@ -12,6 +12,27 @@ Set `omega_prior.cache_dir` to a directory containing any of the following `.npy
 
 Depth arrays are metric depth maps. Confidence arrays are normalized to `[0, 1]` by default and converted to DROID-W-style uncertainty.
 
+## Online VGGT-Omega
+
+The online path uses the official `facebookresearch/vggt-omega` implementation as a submodule:
+
+```bash
+git submodule update --init --recursive thirdparty/vggt-omega
+```
+
+Checkpoint used on this server:
+
+```text
+/data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+```
+
+Example configs:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon_omega_online.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd_omega_online.yaml
+```
+
 ## Ablations
 
 Baseline:
@@ -46,3 +67,7 @@ python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_depth_uncertainty.
 | 2026-07-02 | inline config load for `configs/Dynamic/Bonn/bonn_crowd2.yaml` | N/A | pass | Inherited `omega_prior.enable`, `depth.enable`, and `uncertainty.enable` are all `False` |
 | 2026-07-02 | `python -m py_compile src/depth_video.py src/motion_filter.py src/factor_graph.py src/utils/omega_prior.py` | N/A | pass | Focused syntax check after integration edits |
 | 2026-07-02 | inline `OmegaPriorCache` dummy-cache test | `/tmp/omega_prior_*` | pass | Loaded depth/confidence, resized to `(4, 6)`, uncertainty range `[0.78, 1.0]`, weight range `[0.1, 1.0]` |
+| 2026-07-03 | `git clone --depth 1 git@github.com:facebookresearch/vggt-omega.git thirdparty/vggt-omega` | N/A | pass | Installed official VGGT-Omega at commit `39a0cb8` |
+| 2026-07-03 | `conda run -n droid-w python -m py_compile src/utils/omega_predictor.py src/utils/omega_prior.py src/motion_filter.py src/depth_video.py src/factor_graph.py` | N/A | pass | Syntax check in the actual DROID-W env |
+| 2026-07-03 | inline `OmegaOnlinePredictor` single-frame forward on Bonn balloon | `/data1/czy/Output/DROID-W/vggt_omega_1b_512.pt` | pass | Depth shape `(480, 640)`, mean `1.0424`; confidence mean `28.0436`; uncertainty range `[0.78, 1.0]` |
+| 2026-07-03 | `conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon_omega_smoke.yaml` | `/data1/czy/Output/DROID-W/vggt_omega_1b_512.pt` | pass | 120 frames, 16 keyframes; KF ATE RMSE `0.02138`, full ATE RMSE `0.01889`; final BA disabled |

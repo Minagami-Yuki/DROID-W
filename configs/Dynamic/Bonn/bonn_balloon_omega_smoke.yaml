@@ -1,0 +1,8 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_balloon_omega_online.yaml
+
+scene: bonn_balloon_omega_smoke
+max_frames: 120
+
+tracking:
+  backend:
+    final_ba: False
