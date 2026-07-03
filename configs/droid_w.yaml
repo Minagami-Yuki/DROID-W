@@ -201,6 +201,16 @@ omega_prior:
     patch_size: 16
     device: null
 
+edge_dtf_prior:
+  enable: False
+  edge_quantile: 0.80
+  min_edge_threshold: 0.05
+  max_distance_px: 8.0
+  edge_weight_strength: 0.20
+  residual_power: 1.0
+  min_edge_weight: 0.5
+  max_edge_weight: 1.0
+
 data:
   output: ./output/wildgs_slam
   input_folder: Please_specify_the_path_to_the_dataset

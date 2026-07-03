@@ -29,6 +29,7 @@ class FactorGraph:
 
         self.target = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
         self.weight = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.edge_dtf_weight = torch.ones([1, 0, ht, wd, 1], device=device, dtype=torch.float)
 
         # inactive factors
         self.ii_inac = torch.as_tensor([], dtype=torch.long, device=device)
@@ -38,6 +39,7 @@ class FactorGraph:
 
         self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
         self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+        self.edge_dtf_weight_inac = torch.ones([1, 0, ht, wd, 1], device=device, dtype=torch.float)
 
     def __filter_repeated_edges(self, ii, jj):
         """ remove duplicate edges """
@@ -101,12 +103,14 @@ class FactorGraph:
         self.inp = None
         self.target = None 
         self.weight = None
+        self.edge_dtf_weight = None
         self.ii_inac = None
         self.jj_inac = None
         self.ii_bad = None
         self.jj_bad = None
         self.target_inac = None
         self.weight_inac = None
+        self.edge_dtf_weight_inac = None
 
     @torch.amp.autocast('cuda',enabled=True)
     @torch.no_grad()
@@ -147,6 +151,7 @@ class FactorGraph:
         with torch.amp.autocast('cuda', enabled=False):
             target, _ = self.video.reproject(ii, jj)
             weight = torch.zeros_like(target)
+            edge_dtf_weight = self.video.edge_dtf_weight_from_coords(ii, jj, target)
 
         self.ii = torch.cat([self.ii, ii], 0)
         self.jj = torch.cat([self.jj, jj], 0)
@@ -157,6 +162,7 @@ class FactorGraph:
 
         self.target = torch.cat([self.target, target], 1)
         self.weight = torch.cat([self.weight, weight], 1)
+        self.edge_dtf_weight = torch.cat([self.edge_dtf_weight, edge_dtf_weight], 1)
 
     @torch.amp.autocast('cuda',enabled=True)
     def rm_factors(self, mask, store=False):
@@ -168,6 +174,7 @@ class FactorGraph:
             self.jj_inac = torch.cat([self.jj_inac, self.jj[mask]], 0)
             self.target_inac = torch.cat([self.target_inac, self.target[:,mask]], 1)
             self.weight_inac = torch.cat([self.weight_inac, self.weight[:,mask]], 1)
+            self.edge_dtf_weight_inac = torch.cat([self.edge_dtf_weight_inac, self.edge_dtf_weight[:,mask]], 1)
 
         self.ii = self.ii[~mask]
         self.jj = self.jj[~mask]
@@ -184,6 +191,7 @@ class FactorGraph:
 
         self.target = self.target[:,~mask]
         self.weight = self.weight[:,~mask]
+        self.edge_dtf_weight = self.edge_dtf_weight[:,~mask]
 
 
     @torch.amp.autocast('cuda',enabled=True)
@@ -207,6 +215,9 @@ class FactorGraph:
             self.video.valid_depth_mask_small[ix] = self.video.valid_depth_mask_small[ix+1]
             self.video.omega_uncertainties[ix] = self.video.omega_uncertainties[ix+1]
             self.video.omega_uncertainty_valid[ix] = self.video.omega_uncertainty_valid[ix+1]
+            self.video.edge_dtf_edges[ix] = self.video.edge_dtf_edges[ix+1]
+            self.video.edge_dtf_maps[ix] = self.video.edge_dtf_maps[ix+1]
+            self.video.edge_dtf_valid[ix] = self.video.edge_dtf_valid[ix+1]
 
             self.video.nets[ix] = self.video.nets[ix+1]
             self.video.inps[ix] = self.video.inps[ix+1]
@@ -225,6 +236,7 @@ class FactorGraph:
             self.jj_inac = self.jj_inac[~m]
             self.target_inac = self.target_inac[:,~m]
             self.weight_inac = self.weight_inac[:,~m]
+            self.edge_dtf_weight_inac = self.edge_dtf_weight_inac[:,~m]
 
         m = (self.ii == ix) | (self.jj == ix)
 
@@ -262,13 +274,17 @@ class FactorGraph:
 
             if use_inactive:
                 m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
+                n_inactive = int(m.sum().item())
                 ii = torch.cat([self.ii_inac[m], self.ii], 0)
                 jj = torch.cat([self.jj_inac[m], self.jj], 0)
                 target = torch.cat([self.target_inac[:,m], self.target], 1)
-                weight = torch.cat([self.weight_inac[:,m], self.weight], 1)
+                edge_dtf_weight = torch.cat([self.edge_dtf_weight_inac[:,m], self.edge_dtf_weight], 1)
+                weight = torch.cat([self.weight_inac[:,m], self.weight * self.edge_dtf_weight], 1)
+                weight[:, :n_inactive] = weight[:, :n_inactive] * edge_dtf_weight[:, :n_inactive]
 
             else:
                 ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
+                weight = weight * self.edge_dtf_weight
 
             damping = .2 * self.damping[torch.unique(ii)].contiguous() + EP     # damping factor: avoid singlevalue tensor
 
@@ -327,7 +343,7 @@ class FactorGraph:
             damping = .2 * self.damping[torch.unique(self.ii)].contiguous() + EP
 
             target = self.target
-            weight = self.weight
+            weight = self.weight * self.edge_dtf_weight
 
             # dense bundle adjustment            
             self.video.ba(target, weight, damping, self.ii, self.jj, t0, t1, 

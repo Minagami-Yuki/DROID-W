@@ -14,6 +14,7 @@ from src.utils.Printer import FontColor
 from src.utils.dyn_uncertainty import mapping_utils as map_utils
 from src.utils.plot_utils import create_gif_from_directory
 from src.utils.omega_prior import OmegaPriorCache
+from src.utils.edge_dtf_prior import EdgeDTFPrior
 import matplotlib.pyplot as plt
 import os
 from src.utils.sys_timer import timer
@@ -42,6 +43,7 @@ class DepthVideo:
         self.mono_thres = cfg['tracking']['mono_thres']
         self.device = cfg['device']
         self.omega_prior = OmegaPriorCache(cfg, self.device)
+        self.edge_dtf_prior = EdgeDTFPrior(cfg, self.device)
         self.down_scale = 8
         self.slice_h = slice(self.down_scale // 2 - 1, ht//self.down_scale*self.down_scale+1, self.down_scale)
         self.slice_w = slice(self.down_scale // 2 - 1, wd//self.down_scale*self.down_scale+1, self.down_scale)
@@ -68,6 +70,9 @@ class DepthVideo:
         self.valid_depth_mask_small = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.bool).share_memory_()        
         self.omega_uncertainties = torch.ones(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.omega_uncertainty_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        self.edge_dtf_edges = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
+        self.edge_dtf_maps = torch.ones(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
+        self.edge_dtf_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
@@ -120,6 +125,35 @@ class DepthVideo:
 
         self.timestamp[index] = item[0]
         self.images[index] = item[1].cpu()
+        if self.edge_dtf_prior.enabled:
+            images = item[1]
+            if images.ndim == 3:
+                edge_map, dtf_map = self.edge_dtf_prior.compute_maps(
+                    images,
+                    (self.ht//self.down_scale, self.wd//self.down_scale),
+                )
+                self.edge_dtf_edges[index] = edge_map
+                self.edge_dtf_maps[index] = dtf_map
+                self.edge_dtf_valid[index] = True
+            elif images.ndim == 4:
+                edge_maps = []
+                dtf_maps = []
+                for image in images:
+                    edge_map, dtf_map = self.edge_dtf_prior.compute_maps(
+                        image,
+                        (self.ht//self.down_scale, self.wd//self.down_scale),
+                    )
+                    edge_maps.append(edge_map)
+                    dtf_maps.append(dtf_map)
+                self.edge_dtf_edges[index] = torch.stack(edge_maps, dim=0)
+                self.edge_dtf_maps[index] = torch.stack(dtf_maps, dim=0)
+                self.edge_dtf_valid[index] = True
+            else:
+                raise ValueError(f"Expected image tensor [3,H,W] or [B,3,H,W], got {tuple(images.shape)}")
+        else:
+            self.edge_dtf_edges[index] = 0.0
+            self.edge_dtf_maps[index] = 1.0
+            self.edge_dtf_valid[index] = False
 
         if item[2] is not None:
             self.poses[index] = item[2]
@@ -419,6 +453,55 @@ class DepthVideo:
         source_weight = self.omega_prior.edge_weight_from_uncertainty(source_uncertainty)
         source_weight = torch.where(source_valid, source_weight, torch.ones_like(source_weight))
         return (weight * source_weight[:, None]).contiguous()
+
+    def apply_edge_dtf_edge_weight(self, weight, ii, jj):
+        if not self.edge_dtf_prior.enabled:
+            return weight
+
+        coords, valid_mask = self.reproject(ii, jj)
+        coords = coords.squeeze(0)
+        valid_mask = valid_mask.squeeze(0).squeeze(-1).bool()
+
+        target_dtf = self.edge_dtf_maps[jj].unsqueeze(1)
+        sampled_dtf, sample_valid = self.project_images_with_mask(target_dtf, coords, valid_mask)
+        sampled_dtf = sampled_dtf.squeeze(1)
+
+        valid_pair = (self.edge_dtf_valid[ii] & self.edge_dtf_valid[jj]).view(-1, 1, 1)
+        residual_dtf = torch.where(
+            sample_valid & valid_pair,
+            sampled_dtf,
+            torch.zeros_like(sampled_dtf),
+        )
+        source_edge = torch.where(
+            valid_pair,
+            self.edge_dtf_edges[ii],
+            torch.zeros_like(residual_dtf),
+        )
+        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
+        return (weight * edge_weight[:, None]).contiguous()
+
+    def edge_dtf_weight_from_coords(self, ii, jj, coords):
+        if not self.edge_dtf_prior.enabled:
+            return torch.ones_like(coords[..., :1])
+
+        coords_ = coords.squeeze(0)
+        target_dtf = self.edge_dtf_maps[jj].unsqueeze(1)
+        sampled_dtf, sample_valid = self.project_images_with_mask(target_dtf, coords_)
+        sampled_dtf = sampled_dtf.squeeze(1)
+
+        valid_pair = (self.edge_dtf_valid[ii] & self.edge_dtf_valid[jj]).view(-1, 1, 1)
+        residual_dtf = torch.where(
+            sample_valid & valid_pair,
+            sampled_dtf,
+            torch.zeros_like(sampled_dtf),
+        )
+        source_edge = torch.where(
+            valid_pair,
+            self.edge_dtf_edges[ii],
+            torch.zeros_like(residual_dtf),
+        )
+        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
+        return edge_weight[None, ..., None].contiguous()
 
     @torch.no_grad()
     def visualize_uncertainty(self, target, weight, ii, jj, frame_choice="nearest", mode="Before"):
