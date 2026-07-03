@@ -1,0 +1,20 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_best.yaml
+scene: bonn_crowd2_omega_edge_dtf015_cycle008_soft050
+
+edge_dtf_prior:
+  enable: True
+  edge_quantile: 0.80
+  min_edge_threshold: 0.05
+  max_distance_px: 6.0
+  edge_weight_strength: 0.15
+  residual_power: 1.0
+  min_edge_weight: 0.7
+  max_edge_weight: 1.0
+  cycle_consistency:
+    enable: True
+    mode: pair
+    max_asymmetry: 0.08
+    failed_scale: 0.5
+    min_mean_residual: 0.0
+    max_mean_residual: 1.0
+    min_edge_mass: 16.0

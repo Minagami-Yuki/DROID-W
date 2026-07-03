@@ -465,7 +465,14 @@ class DepthVideo:
             coords,
             valid_mask=valid_mask,
         )
-        source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf)
+        source_edge = self.apply_edge_dtf_cycle_gate(
+            ii,
+            jj,
+            source_edge,
+            residual_dtf,
+            coords=coords,
+            valid_mask=valid_mask,
+        )
         edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
         return (weight * edge_weight[:, None]).contiguous()
 
@@ -474,7 +481,7 @@ class DepthVideo:
             return torch.ones_like(coords[..., :1])
 
         source_edge, residual_dtf = self.edge_dtf_residual_from_coords(ii, jj, coords)
-        source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf)
+        source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf, coords=coords)
         edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
         return edge_weight[None, ..., None].contiguous()
 
@@ -499,10 +506,22 @@ class DepthVideo:
         )
         return source_edge, residual_dtf
 
-    def apply_edge_dtf_cycle_gate(self, ii, jj, source_edge, residual_dtf):
+    def apply_edge_dtf_cycle_gate(self, ii, jj, source_edge, residual_dtf, coords=None, valid_mask=None):
         cycle_cfg = self.edge_dtf_prior.cfg.get("cycle_consistency", {}) or {}
         if not bool(cycle_cfg.get("enable", False)):
             return source_edge
+
+        mode = cycle_cfg.get("mode", "pair")
+        if mode == "pixel":
+            return self.apply_edge_dtf_pixel_cycle_gate(
+                ii,
+                jj,
+                source_edge,
+                residual_dtf,
+                coords,
+                valid_mask,
+                cycle_cfg,
+            )
 
         reverse_coords, reverse_valid = self.reproject(jj, ii)
         reverse_edge, reverse_dtf = self.edge_dtf_residual_from_coords(
@@ -519,6 +538,7 @@ class DepthVideo:
         min_residual = float(cycle_cfg.get("min_mean_residual", 0.0))
         max_residual = float(cycle_cfg.get("max_mean_residual", 1.0))
         min_edge_mass = float(cycle_cfg.get("min_edge_mass", 16.0))
+        failed_scale = float(cycle_cfg.get("failed_scale", 0.0))
 
         pair_static = (
             (torch.abs(fwd_mean - rev_mean) <= max_asym)
@@ -529,13 +549,57 @@ class DepthVideo:
             & (fwd_mass >= min_edge_mass)
             & (rev_mass >= min_edge_mass)
         )
-        return source_edge * pair_static.to(source_edge.dtype).view(-1, 1, 1)
+        gate = torch.where(
+            pair_static,
+            torch.ones_like(fwd_mean),
+            torch.full_like(fwd_mean, failed_scale),
+        )
+        return source_edge * gate.view(-1, 1, 1)
 
     def edge_dtf_mean_residual(self, source_edge, residual_dtf):
         edge_mass = source_edge.sum(dim=(1, 2))
         residual_sum = (source_edge * residual_dtf).sum(dim=(1, 2))
         mean_residual = residual_sum / edge_mass.clamp(min=1e-6)
         return mean_residual, edge_mass
+
+    def apply_edge_dtf_pixel_cycle_gate(self, ii, jj, source_edge, residual_dtf, coords, valid_mask, cycle_cfg):
+        if coords is None:
+            return source_edge
+
+        coords_ = coords.squeeze(0)
+        if valid_mask is not None:
+            valid_mask = valid_mask.squeeze(0).squeeze(-1).bool()
+
+        target_edge = (self.edge_dtf_edges[jj] * self.edge_dtf_static_gate(jj)).unsqueeze(1)
+        sampled_target_edge, sample_valid = self.project_images_with_mask(target_edge, coords_, valid_mask)
+        sampled_target_edge = sampled_target_edge.squeeze(1)
+
+        valid_pair = (self.edge_dtf_valid[ii] & self.edge_dtf_valid[jj]).view(-1, 1, 1)
+        source_dtf = torch.where(
+            valid_pair,
+            self.edge_dtf_maps[ii],
+            torch.zeros_like(residual_dtf),
+        )
+        reverse_like_residual = torch.where(
+            sample_valid & valid_pair,
+            sampled_target_edge * source_dtf,
+            torch.zeros_like(residual_dtf),
+        )
+
+        forward_residual = source_edge * residual_dtf
+        asymmetry = torch.abs(forward_residual - reverse_like_residual)
+
+        max_asym = float(cycle_cfg.get("max_pixel_asymmetry", cycle_cfg.get("max_asymmetry", 0.12)))
+        min_residual = float(cycle_cfg.get("min_mean_residual", 0.0))
+        max_residual = float(cycle_cfg.get("max_mean_residual", 1.0))
+        pixel_keep = (
+            (asymmetry <= max_asym)
+            & (forward_residual >= min_residual)
+            & (forward_residual <= max_residual)
+            & sample_valid
+            & valid_pair
+        )
+        return source_edge * pixel_keep.to(source_edge.dtype)
 
     def edge_dtf_static_gate(self, ii):
         gate_cfg = self.edge_dtf_prior.cfg.get("gate", {}) or {}

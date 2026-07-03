@@ -217,7 +217,10 @@ edge_dtf_prior:
     droid_max_uncertainty: 0.90
   cycle_consistency:
     enable: False
+    mode: pair
     max_asymmetry: 0.08
+    max_pixel_asymmetry: 0.12
+    failed_scale: 0.0
     min_mean_residual: 0.0
     max_mean_residual: 1.0
     min_edge_mass: 16.0
