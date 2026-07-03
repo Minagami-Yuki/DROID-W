@@ -1,5 +1,5 @@
-inherit_from: ./configs/Dynamic/Bonn/bonn_crowd.yaml
-scene: bonn_crowd_omega_online
+inherit_from: ./configs/Dynamic/Bonn/bonn_moving_nonobstructing_box2.yaml
+scene: bonn_moving_nonobstructing_box2_omega_online
 
 omega_prior:
   enable: True

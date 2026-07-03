@@ -1,4 +1,5 @@
 inherit_from: ./configs/Dynamic/Bonn/bonn_balloon.yaml
+scene: bonn_balloon_omega_online
 
 omega_prior:
   enable: True
