@@ -100,6 +100,7 @@ class MotionFilter:
         if depth_enabled and omega_depth is not None:
             mode = self.omega_prior.depth_cfg.get("mode", "replace")
             if mode == "blend":
+                omega_depth = self._align_omega_depth_to_mono(omega_depth, mono_depth)
                 alpha = float(self.omega_prior.depth_cfg.get("blend_alpha", 1.0))
                 valid = omega_depth > 0
                 mono_depth = torch.where(valid, alpha * omega_depth + (1.0 - alpha) * mono_depth, mono_depth)
@@ -107,6 +108,43 @@ class MotionFilter:
                 mono_depth = torch.where(omega_depth > 0, omega_depth, mono_depth)
 
         return mono_depth, omega_uncertainty
+
+    def _align_omega_depth_to_mono(self, omega_depth, mono_depth):
+        align_mode = self.omega_prior.depth_cfg.get("align_to_mono", "none")
+        if align_mode in [False, None, "none"]:
+            return omega_depth
+
+        if align_mode != "scale":
+            raise ValueError("omega_prior.depth.align_to_mono currently supports only 'none' or 'scale'")
+
+        min_depth = float(self.omega_prior.depth_cfg.get("min_depth", 1e-4))
+        valid = (
+            torch.isfinite(omega_depth)
+            & torch.isfinite(mono_depth)
+            & (omega_depth > min_depth)
+            & (mono_depth > min_depth)
+        )
+        if valid.sum() < int(self.omega_prior.depth_cfg.get("align_min_pixels", 256)):
+            return omega_depth
+
+        ratio = mono_depth[valid] / omega_depth[valid]
+        ratio = ratio[torch.isfinite(ratio)]
+        if ratio.numel() == 0:
+            return omega_depth
+
+        trim = float(self.omega_prior.depth_cfg.get("align_trim", 0.05))
+        if ratio.numel() > 20 and trim > 0.0:
+            lo = torch.quantile(ratio, trim)
+            hi = torch.quantile(ratio, 1.0 - trim)
+            ratio = ratio[(ratio >= lo) & (ratio <= hi)]
+            if ratio.numel() == 0:
+                return omega_depth
+
+        scale = torch.median(ratio)
+        min_scale = float(self.omega_prior.depth_cfg.get("align_min_scale", 0.2))
+        max_scale = float(self.omega_prior.depth_cfg.get("align_max_scale", 5.0))
+        scale = torch.clamp(scale, min=min_scale, max=max_scale)
+        return omega_depth * scale
 
     @torch.amp.autocast('cuda',enabled=True)
     @torch.no_grad()

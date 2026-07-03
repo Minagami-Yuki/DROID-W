@@ -89,7 +89,19 @@ class OmegaPriorCache:
             - float(self.uncertainty_cfg.get("droid_shift", 35.0)),
             min=float(self.uncertainty_cfg.get("droid_min_scale", 0.1)),
         )
-        return torch.clamp(1.0 / scale, 0.0, 1.0)
+        weight = torch.clamp(1.0 / scale, 0.0, 1.0)
+
+        power = float(self.uncertainty_cfg.get("edge_weight_power", 1.0))
+        if power != 1.0:
+            weight = torch.pow(torch.clamp(weight, min=1e-6), power)
+
+        min_weight = float(self.uncertainty_cfg.get("min_edge_weight", 0.0))
+        max_weight = float(self.uncertainty_cfg.get("max_edge_weight", 1.0))
+        weight = torch.clamp(weight, min=min_weight, max=max_weight)
+
+        strength = float(self.uncertainty_cfg.get("edge_weight_strength", 1.0))
+        strength = min(max(strength, 0.0), 1.0)
+        return 1.0 - strength * (1.0 - weight)
 
     def confidence_to_uncertainty(self, confidence: torch.Tensor) -> torch.Tensor:
         return self._confidence_to_uncertainty(confidence)

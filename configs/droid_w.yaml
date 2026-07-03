@@ -165,6 +165,11 @@ omega_prior:
     enable: False
     mode: replace # replace | blend
     blend_alpha: 1.0
+    align_to_mono: none # none | scale, only used by blend mode
+    align_trim: 0.05
+    align_min_pixels: 256
+    align_min_scale: 0.2
+    align_max_scale: 5.0
     fallback_to_mono: True
     scale: 1.0
     min_depth: 0.0001
@@ -182,6 +187,10 @@ omega_prior:
     droid_scale: 45.0
     droid_shift: 35.0
     droid_min_scale: 0.1
+    edge_weight_strength: 1.0
+    edge_weight_power: 1.0
+    min_edge_weight: 0.0
+    max_edge_weight: 1.0
     write_to_droid_uncertainty: False
     freeze_droid_uncertainty_update: False
   model:

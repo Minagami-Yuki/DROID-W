@@ -1,0 +1,24 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking.yaml
+scene: bonn_person_tracking_omega_blend010_u_soft030
+
+omega_prior:
+  enable: True
+  source: model
+  depth:
+    enable: True
+    mode: blend
+    blend_alpha: 0.10
+    align_to_mono: scale
+    align_trim: 0.05
+    fallback_to_mono: True
+  uncertainty:
+    enable: True
+    apply_to: edge_weight
+    normalize_confidence: True
+    edge_weight_strength: 0.30
+    freeze_droid_uncertainty_update: False
+  model:
+    repo_path: thirdparty/vggt-omega
+    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    image_resolution: 512
+    preprocess_mode: balanced
