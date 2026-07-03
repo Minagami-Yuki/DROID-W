@@ -474,7 +474,7 @@ class DepthVideo:
         )
         source_edge = torch.where(
             valid_pair,
-            self.edge_dtf_edges[ii],
+            self.edge_dtf_edges[ii] * self.edge_dtf_static_gate(ii),
             torch.zeros_like(residual_dtf),
         )
         edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
@@ -497,11 +497,26 @@ class DepthVideo:
         )
         source_edge = torch.where(
             valid_pair,
-            self.edge_dtf_edges[ii],
+            self.edge_dtf_edges[ii] * self.edge_dtf_static_gate(ii),
             torch.zeros_like(residual_dtf),
         )
         edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
         return edge_weight[None, ..., None].contiguous()
+
+    def edge_dtf_static_gate(self, ii):
+        gate_cfg = self.edge_dtf_prior.cfg.get("gate", {}) or {}
+        gate = torch.ones_like(self.edge_dtf_edges[ii])
+
+        if bool(gate_cfg.get("omega_uncertainty", False)):
+            omega_valid = self.omega_uncertainty_valid[ii].view(-1, 1, 1)
+            omega_static = self.omega_uncertainties[ii] <= float(gate_cfg.get("omega_max_uncertainty", 0.86))
+            gate = gate * (omega_valid & omega_static).to(gate.dtype)
+
+        if bool(gate_cfg.get("droid_uncertainty", False)) and self.uncertainty_aware:
+            droid_static = self.uncertainties[ii] <= float(gate_cfg.get("droid_max_uncertainty", 0.90))
+            gate = gate * droid_static.to(gate.dtype)
+
+        return gate
 
     @torch.no_grad()
     def visualize_uncertainty(self, target, weight, ii, jj, frame_choice="nearest", mode="Before"):

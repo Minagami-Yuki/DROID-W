@@ -210,6 +210,11 @@ edge_dtf_prior:
   residual_power: 1.0
   min_edge_weight: 0.5
   max_edge_weight: 1.0
+  gate:
+    omega_uncertainty: False
+    omega_max_uncertainty: 0.86
+    droid_uncertainty: False
+    droid_max_uncertainty: 0.90
 
 data:
   output: ./output/wildgs_slam
