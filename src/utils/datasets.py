@@ -229,6 +229,7 @@ class BaseDataset(Dataset):
         return index, color_data, depth_data, pose
 
     def save_gt_poses(self, path, poses):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         # convert rotation matrix to quaternions, save to txt file
         idx = 0
         with open(path, 'w') as f:
@@ -496,6 +497,7 @@ class TUM_RGBD(BaseDataset):
         return pose
     
     def save_gt_poses(self, path, poses):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         # convert rotation matrix to quaternions, save to txt file
         idx = 0
         with open(path, 'w') as f:
