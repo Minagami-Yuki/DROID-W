@@ -1,0 +1,23 @@
+inherit_from: ./configs/droid_w.yaml
+scene: chess_seq01
+dataset: 7scenes
+
+data:
+  input_folder: /data1/czy/datasets/7scenes/chess/seq-01
+  output: ./Outputs/7Scenes
+
+tracking:
+  buffer: 350
+
+cam:
+  png_depth_scale: 1000.0
+  H: 480
+  W: 640
+  fx: 585.0
+  fy: 585.0
+  cx: 320.0
+  cy: 240.0
+  H_edge: 8
+  W_edge: 8
+  H_out: 384
+  W_out: 512

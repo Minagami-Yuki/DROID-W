@@ -315,6 +315,65 @@ class ScanNet(BaseDataset):
             self.poses.append(c2w)
 
 
+class SevenScenes(BaseDataset):
+    """Loader for the original Microsoft 7-Scenes RGB-D format."""
+    def __init__(self, cfg, device='cuda:0'):
+        super(SevenScenes, self).__init__(cfg, device)
+        stride = cfg['stride']
+        max_frames = cfg['max_frames']
+
+        self.color_paths = sorted(
+            glob.glob(os.path.join(self.input_folder, 'frame-*.color.png')))
+        self.depth_paths = [
+            path.replace('.color.png', '.depth.png')
+            for path in self.color_paths
+        ]
+        pose_paths = [
+            path.replace('.color.png', '.pose.txt')
+            for path in self.color_paths
+        ]
+
+        if max_frames < 0:
+            max_frames = len(self.color_paths)
+
+        self.color_paths = self.color_paths[:max_frames][::stride]
+        self.depth_paths = self.depth_paths[:max_frames][::stride]
+        pose_paths = pose_paths[:max_frames][::stride]
+
+        self.poses = self.load_poses(pose_paths)
+        self.n_img = len(self.color_paths)
+        self.w2c_first_pose = np.linalg.inv(self.poses[0])
+        print("INFO: {} images got!".format(self.n_img))
+
+        if cfg['save_gt_poses']:
+            output_folder = cfg["data"]["output"] + "/" + cfg["scene"]
+            self.save_gt_poses(os.path.join(output_folder, 'gt_poses.txt'), self.poses)
+
+    def load_poses(self, pose_paths):
+        poses = []
+        inv_pose = None
+        for pose_path in pose_paths:
+            c2w = np.loadtxt(pose_path).reshape(4, 4)
+            if inv_pose is None:
+                inv_pose = np.linalg.inv(c2w)
+                c2w = np.eye(4)
+            else:
+                c2w = inv_pose @ c2w
+            poses.append(c2w)
+        return np.stack(poses, axis=0)
+
+    def save_gt_poses(self, path, poses):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            for idx, pose in enumerate(poses):
+                quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()
+                translation = pose[:3, 3]
+                f.write(
+                    f"{idx} {translation[0]:.6f} {translation[1]:.6f} {translation[2]:.6f} "
+                    f"{quaternion[0]:.6f} {quaternion[1]:.6f} {quaternion[2]:.6f} {quaternion[3]:.6f}\n")
+        print("INFO: GT poses saved to {}".format(path))
+
+
 class TUM_RGBD(BaseDataset):
     def __init__(self, cfg, device='cuda:0'
                  ):
@@ -591,6 +650,7 @@ class Dycheck(BaseDataset):
 dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "bonn_dynamic": TUM_RGBD,
+    "7scenes": SevenScenes,
     "youtube": RGB_NoPose,
     "dycheck": Dycheck,
     "droidw": RGB_NoPose,
