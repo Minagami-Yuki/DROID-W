@@ -1,0 +1,46 @@
+inherit_from: ./configs/Dynamic/TUM_RGBD/freiburg3_walking_halfsphere.yaml
+scene: freiburg3_walking_halfsphere_omega_edge_dtf015_cycle008_soft050
+
+data:
+  input_folder: /data1/czy/datasets/TUM_RGBD/dynamic/rgbd_dataset_freiburg3_walking_halfsphere
+  output: ./Outputs/TUM_RGBD
+
+omega_prior:
+  enable: True
+  source: model
+  depth:
+    enable: True
+    mode: blend
+    blend_alpha: 0.10
+    align_to_mono: scale
+    align_trim: 0.05
+    fallback_to_mono: True
+  uncertainty:
+    enable: True
+    apply_to: edge_weight
+    normalize_confidence: True
+    edge_weight_strength: 0.25
+    freeze_droid_uncertainty_update: False
+  model:
+    repo_path: thirdparty/vggt-omega
+    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    image_resolution: 512
+    preprocess_mode: balanced
+
+edge_dtf_prior:
+  enable: True
+  edge_quantile: 0.80
+  min_edge_threshold: 0.05
+  max_distance_px: 6.0
+  edge_weight_strength: 0.15
+  residual_power: 1.0
+  min_edge_weight: 0.7
+  max_edge_weight: 1.0
+  cycle_consistency:
+    enable: True
+    mode: pair
+    max_asymmetry: 0.08
+    failed_scale: 0.5
+    min_mean_residual: 0.0
+    max_mean_residual: 1.0
+    min_edge_mass: 16.0
