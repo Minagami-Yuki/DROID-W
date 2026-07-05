@@ -8,6 +8,7 @@ from src.utils.datasets import load_metric_depth, load_img_feature
 from src.utils.mono_priors.img_feature_extractors import predict_img_features, get_feature_extractor
 from src.utils.omega_prior import OmegaPriorCache
 from src.utils.omega_predictor import OmegaOnlinePredictor
+from src.utils.omega_visualization import OmegaUncertaintyVisualizer
 
 class MotionFilter:
     """ This class is used to filter incoming frames and extract features 
@@ -26,6 +27,7 @@ class MotionFilter:
         self.device = device
 
         self.count = 0
+        self.input_frame_counter = 0
 
         # mean, std for image normalization
         self.MEAN = torch.as_tensor([0.485, 0.456, 0.406], device=self.device)[:, None, None]
@@ -35,6 +37,7 @@ class MotionFilter:
         self.save_dir = cfg['data']['output'] + '/' + cfg['scene']
         self.omega_prior = OmegaPriorCache(cfg, device)
         self.omega_predictor = OmegaOnlinePredictor(cfg, device)
+        self.omega_uncertainty_visualizer = OmegaUncertaintyVisualizer(cfg, self.save_dir)
         self.use_metric_depth_estimator = self._should_use_metric_depth_estimator()
         self.metric_depth_estimator = get_metric_depth_estimator(cfg) if self.use_metric_depth_estimator else None
         if cfg['mapping']["uncertainty_params"]['activate']:
@@ -73,7 +76,7 @@ class MotionFilter:
             )
         return torch.zeros(image.shape[-2:], device=self.device, dtype=torch.float32)
 
-    def _apply_omega_prior(self, tstamp, mono_depth, image):
+    def _apply_omega_prior(self, tstamp, mono_depth, image, frame_idx=None, keyframe_idx=None):
         image_hw = tuple(image.shape[-2:])
         omega_cfg = self.cfg.get('omega_prior', {}) or {}
         depth_cfg = omega_cfg.get('depth', {}) or {}
@@ -107,7 +110,38 @@ class MotionFilter:
             else:
                 mono_depth = torch.where(omega_depth > 0, omega_depth, mono_depth)
 
+        self._save_omega_uncertainty_visual(frame_idx, tstamp, omega_uncertainty, keyframe_idx)
         return mono_depth, omega_uncertainty
+
+    def _omega_source(self):
+        omega_cfg = self.cfg.get('omega_prior', {}) or {}
+        source = omega_cfg.get('source', 'cache')
+        if source == 'auto':
+            source = 'cache' if omega_cfg.get('cache_dir') else 'model'
+        return source
+
+    def _predict_omega_uncertainty_for_visualization(self, tstamp, image):
+        if not self.omega_uncertainty_visualizer.enabled or not self.omega_prior.uncertainty_enabled:
+            return None
+
+        image_hw = tuple(image.shape[-2:])
+        source = self._omega_source()
+        if source in ['model', 'online']:
+            _, omega_confidence = self.omega_predictor.predict_frame(image)
+            return self.omega_prior.confidence_to_uncertainty(omega_confidence)
+
+        _, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
+        return omega_uncertainty
+
+    def _save_omega_uncertainty_visual(self, frame_idx, tstamp, omega_uncertainty, keyframe_idx=None):
+        if frame_idx is None:
+            return
+        self.omega_uncertainty_visualizer.save(
+            omega_uncertainty,
+            frame_idx=int(frame_idx),
+            timestamp=tstamp,
+            keyframe_idx=keyframe_idx,
+        )
 
     def _align_omega_depth_to_mono(self, omega_depth, mono_depth):
         align_mode = self.omega_prior.depth_cfg.get("align_to_mono", "none")
@@ -151,6 +185,9 @@ class MotionFilter:
     def track(self, tstamp, image, intrinsics=None):
         """ main update operation - run on every frame in video """
 
+        frame_idx = self.input_frame_counter
+        self.input_frame_counter += 1
+
         Id = lietorch.SE3.Identity(1,).data.squeeze()
         ht = image.shape[-2] // self.video.down_scale
         wd = image.shape[-1] // self.video.down_scale
@@ -169,7 +206,8 @@ class MotionFilter:
             net, inp = self.__context_encoder(inputs[:,[0]])
             self.net, self.inp, self.fmap = net, inp, gmap
             mono_depth = self._predict_depth_prior(tstamp, image)
-            mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
+            mono_depth, omega_uncertainty = self._apply_omega_prior(
+                tstamp, mono_depth, image, frame_idx=frame_idx, keyframe_idx=self.video.counter.value)
             if self.uncertainty_aware:
                 dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
             else:
@@ -199,7 +237,8 @@ class MotionFilter:
                 net, inp = self.__context_encoder(inputs[:,[0]])
                 self.net, self.inp, self.fmap = net, inp, gmap
                 mono_depth = self._predict_depth_prior(tstamp, image)
-                mono_depth, omega_uncertainty = self._apply_omega_prior(tstamp, mono_depth, image)
+                mono_depth, omega_uncertainty = self._apply_omega_prior(
+                    tstamp, mono_depth, image, frame_idx=frame_idx, keyframe_idx=self.video.counter.value)
                 if self.uncertainty_aware:
                     dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
                 else:
@@ -212,6 +251,10 @@ class MotionFilter:
                 # gmap: torch.Size([1, 128, 45, 80]) net[0]: [128, 45, 80] inp: [1, 128, 45, 80], dino_features: [25, 45, 384]
             else:
                 self.count += 1
+                if self.omega_uncertainty_visualizer.should_save(frame_idx):
+                    omega_uncertainty = self._predict_omega_uncertainty_for_visualization(tstamp, image)
+                    self._save_omega_uncertainty_visual(
+                        frame_idx, tstamp, omega_uncertainty, keyframe_idx=max(self.video.counter.value - 1, 0))
 
         return force_to_add_keyframe
 

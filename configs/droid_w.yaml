@@ -193,6 +193,15 @@ omega_prior:
     max_edge_weight: 1.0
     write_to_droid_uncertainty: False
     freeze_droid_uncertainty_update: False
+  visualization:
+    enable: False
+    interval: 100
+    save_first: True
+    output_dir: null
+    colormap: magma
+    min_value: null
+    max_value: null
+    save_raw_npy: False
   model:
     repo_path: thirdparty/vggt-omega
     checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
