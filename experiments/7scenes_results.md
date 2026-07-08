@@ -110,3 +110,58 @@ Metric files:
 
 - `Outputs/7Scenes/chess_seq01_omega_edge_dtf015_cycle008_soft050/traj/metrics_kf_traj.txt`
 - `Outputs/7Scenes/chess_seq01_omega_edge_dtf015_cycle008_soft050/traj/metrics_full_traj.txt`
+
+## Omega Patch-Token Evidence-Floor V11 Spot Check
+
+Date: 2026-07-08
+
+Config:
+
+```text
+configs/Static/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020.yaml
+```
+
+This run keeps the previous Omega + Edge-DTF soft-cycle setting and adds the Bonn-selected dense patch-token uncertainty with conditional Edge-DTF gating and `evidence_floor.fallback_min_gate=0.20`.
+
+Command:
+
+```bash
+conda run -n droid-w python run.py --config configs/Static/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020.yaml
+```
+
+ATE RMSE in meters. FPS is from `timer_summary.csv`.
+
+| Sequence | Method | Frames | KF RMSE | Full RMSE | KF Mean | Full Mean | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| chess/seq-01 | DROID-W baseline | 1000 | 0.037822 | 0.037051 | 0.033394 | 0.033077 | 15.81 | 8.16 |
+| chess/seq-01 | Omega + Edge-DTF soft cycle | 1000 | 0.037764 | 0.037005 | 0.033363 | 0.033024 | 11.01 | 6.64 |
+| chess/seq-01 | Omega patch-token v11 evidence floor | 1000 | 0.037730 | 0.036968 | 0.033326 | 0.032994 | 10.93 | 6.63 |
+
+Delta versus DROID-W baseline:
+
+| Metric | Delta |
+| --- | ---: |
+| KF RMSE | -0.000092 m / -0.24% |
+| Full RMSE | -0.000083 m / -0.22% |
+| Tracking FPS | -4.88 FPS / -30.87% |
+| Full FPS | -1.53 FPS / -18.75% |
+
+Delta versus previous Omega + Edge-DTF soft cycle:
+
+| Metric | Delta |
+| --- | ---: |
+| KF RMSE | -0.000034 m / -0.09% |
+| Full RMSE | -0.000037 m / -0.10% |
+| Tracking FPS | -0.08 FPS / -0.73% |
+| Full FPS | -0.01 FPS / -0.15% |
+
+Output files:
+
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020/traj/metrics_kf_traj.txt`
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020/traj/metrics_full_traj.txt`
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020/timer_summary.csv`
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v11_evidence_floor020/final_point_cloud.ply`
+
+Takeaway:
+
+- On static `chess/seq-01`, patch-token v11 does not hurt tracking accuracy and slightly improves full RMSE compared with both DROID-W and the earlier Omega + Edge-DTF setting. Runtime is essentially unchanged versus Omega + Edge-DTF, but remains slower than the original DROID-W baseline because Omega inference is online.

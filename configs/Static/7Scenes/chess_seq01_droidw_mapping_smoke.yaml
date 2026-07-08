@@ -1,0 +1,11 @@
+inherit_from: ./configs/Static/7Scenes/chess_seq01.yaml
+scene: chess_seq01_droidw_mapping_smoke
+max_frames: 120
+
+mapping:
+  enable: True
+  online_plotting: False
+  eval_before_final_ba: True
+
+point_cloud:
+  save_final: False

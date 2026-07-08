@@ -28,7 +28,7 @@ from thirdparty.gaussian_splatting.utils.general_utils import (
     strip_symmetric,
 )
 from thirdparty.gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
-from thirdparty.gaussian_splatting.utils.sh_utils import RGB2SH
+from thirdparty.gaussian_splatting.utils.sh_utils import RGB2SH, SH2RGB
 from thirdparty.gaussian_splatting.utils.system_utils import mkdir_p
 
 
@@ -383,6 +383,40 @@ class GaussianModel:
             (xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1
         )
         elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, "vertex")
+        PlyData([el]).write(path)
+
+    def save_rgb_ply(self, path):
+        """Save a MeshLab-friendly colored point cloud from Gaussian means.
+
+        The native 3DGS PLY stores color in SH/DC feature fields (`f_dc_*`),
+        which common point-cloud viewers do not interpret as RGB. This helper
+        preserves the Gaussian centers and exports explicit uchar RGB fields.
+        """
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        colors = SH2RGB(self._features_dc.detach().squeeze(1))
+        colors = torch.clamp(colors, min=0.0, max=1.0)
+        colors = (colors * 255.0).byte().cpu().numpy()
+
+        elements = np.empty(
+            xyz.shape[0],
+            dtype=[
+                ("x", "f4"),
+                ("y", "f4"),
+                ("z", "f4"),
+                ("red", "u1"),
+                ("green", "u1"),
+                ("blue", "u1"),
+            ],
+        )
+        elements["x"] = xyz[:, 0]
+        elements["y"] = xyz[:, 1]
+        elements["z"] = xyz[:, 2]
+        elements["red"] = colors[:, 0]
+        elements["green"] = colors[:, 1]
+        elements["blue"] = colors[:, 2]
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 

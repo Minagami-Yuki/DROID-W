@@ -359,9 +359,9 @@ edge_dtf_prior:
     max_scale: 1.0
 
 point_cloud:
-  save_final: True
+  save_final: False
   filename: final_point_cloud.ply
-  depth_source: droid # droid | mono
+  depth_source: both # droid | mono | both
   stride: 4
   max_points_per_frame: 12000
   min_depth: 0.05

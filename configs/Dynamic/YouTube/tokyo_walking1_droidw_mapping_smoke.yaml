@@ -1,0 +1,11 @@
+inherit_from: ./configs/Dynamic/YouTube/tokyo_walking1.yaml
+scene: tokyo_walking1_droidw_mapping_smoke
+max_frames: 120
+
+mapping:
+  enable: True
+  online_plotting: False
+  eval_before_final_ba: False
+
+point_cloud:
+  save_final: False

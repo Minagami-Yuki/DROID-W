@@ -214,6 +214,7 @@ class SLAM:
             full_traj_eval(traj_est, self.stream, self.printer, self.logger, f"{self.save_dir}/traj", "full_traj")
             
             self.mapper.gaussians.save_ply(f"{self.save_dir}/final_gs.ply")
+            self.mapper.gaussians.save_rgb_ply(f"{self.save_dir}/final_gs_rgb.ply")
             
         else:
             traj_est = None
