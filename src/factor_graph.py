@@ -218,6 +218,10 @@ class FactorGraph:
             self.video.edge_dtf_edges[ix] = self.video.edge_dtf_edges[ix+1]
             self.video.edge_dtf_maps[ix] = self.video.edge_dtf_maps[ix+1]
             self.video.edge_dtf_valid[ix] = self.video.edge_dtf_valid[ix+1]
+            self.video.omega_tokens[ix] = self.video.omega_tokens[ix+1]
+            self.video.omega_token_valid[ix] = self.video.omega_token_valid[ix+1]
+            self.video.omega_patch_maps[ix] = self.video.omega_patch_maps[ix+1]
+            self.video.omega_patch_valid[ix] = self.video.omega_patch_valid[ix+1]
 
             self.video.nets[ix] = self.video.nets[ix+1]
             self.video.inps[ix] = self.video.inps[ix+1]

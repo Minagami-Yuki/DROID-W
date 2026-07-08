@@ -13,6 +13,7 @@ class OmegaPriorCache:
         self.cfg = cfg.get("omega_prior", {}) or {}
         self.device = device
         self.cache_dir = self.cfg.get("cache_dir")
+        self.cache_cfg = self.cfg.get("cache", {}) or {}
         self.enabled = bool(self.cfg.get("enable", False))
         self.depth_cfg = self.cfg.get("depth", {}) or {}
         self.uncertainty_cfg = self.cfg.get("uncertainty", {}) or {}
@@ -43,6 +44,69 @@ class OmegaPriorCache:
         depth = self._load_depth(frame_idx, image_hw) if self.depth_enabled else None
         uncertainty = self._load_uncertainty(frame_idx, image_hw) if self.uncertainty_enabled else None
         return depth, uncertainty
+
+    def load_tokens_for_frame(self, frame_idx: int) -> Optional[torch.Tensor]:
+        if not self.enabled or not self.cache_dir:
+            return None
+
+        path = self._find_prior_file(frame_idx, "tokens")
+        if path is None:
+            self._handle_missing("tokens", frame_idx)
+            return None
+
+        array = np.load(path)
+        tensor = torch.from_numpy(np.asarray(array)).float().squeeze()
+        if tensor.ndim == 1:
+            tensor = tensor[None]
+        if tensor.ndim > 2:
+            tensor = tensor.reshape(-1, tensor.shape[-1])
+        if tensor.ndim != 2:
+            raise ValueError(f"Expected 1D or 2D Omega tokens at {path}, got shape {tuple(tensor.shape)}")
+        return tensor.to(self.device)
+
+    def load_patch_map_for_frame(self, frame_idx: int) -> Optional[torch.Tensor]:
+        if not self.enabled or not self.cache_dir:
+            return None
+
+        path = self._find_prior_file(frame_idx, "patch_tokens")
+        if path is None:
+            self._handle_missing("patch_tokens", frame_idx)
+            return None
+
+        array = np.load(path)
+        tensor = torch.from_numpy(np.asarray(array)).float().squeeze()
+        if tensor.ndim != 3:
+            raise ValueError(f"Expected 3D Omega patch token map at {path}, got shape {tuple(tensor.shape)}")
+        return tensor.to(self.device)
+
+    def save_for_frame(
+        self,
+        frame_idx: int,
+        depth: Optional[torch.Tensor] = None,
+        confidence: Optional[torch.Tensor] = None,
+        uncertainty: Optional[torch.Tensor] = None,
+        tokens: Optional[torch.Tensor] = None,
+        patch_map: Optional[torch.Tensor] = None,
+    ) -> None:
+        if not bool(self.cache_cfg.get("write", False)):
+            return
+
+        cache_dir = self.cache_cfg.get("output_dir") or self.cache_dir
+        if not cache_dir:
+            self._warn_once("missing_cache_output_dir", "Omega cache.write is enabled but no cache output directory is configured.")
+            return
+
+        overwrite = bool(self.cache_cfg.get("overwrite", False))
+        if bool(self.cache_cfg.get("save_depth", True)):
+            self._save_array(cache_dir, "depth", frame_idx, depth, overwrite)
+        if bool(self.cache_cfg.get("save_confidence", True)):
+            self._save_array(cache_dir, "confidence", frame_idx, confidence, overwrite)
+        if bool(self.cache_cfg.get("save_uncertainty", True)):
+            self._save_array(cache_dir, "uncertainty", frame_idx, uncertainty, overwrite)
+        if bool(self.cache_cfg.get("save_tokens", True)):
+            self._save_array(cache_dir, "tokens", frame_idx, tokens, overwrite)
+        if bool(self.cache_cfg.get("save_patch_tokens", True)):
+            self._save_array(cache_dir, "patch_tokens", frame_idx, patch_map, overwrite)
 
     def _load_depth(self, frame_idx: int, image_hw: Tuple[int, int]) -> Optional[torch.Tensor]:
         path = self._find_prior_file(frame_idx, "depth")
@@ -153,6 +217,8 @@ class OmegaPriorCache:
             "depth": ["depth", "omega_depth", "vggt_depth"],
             "confidence": ["confidence", "conf", "omega_confidence", "vggt_confidence"],
             "uncertainty": ["uncertainty", "uncer", "omega_uncertainty"],
+            "tokens": ["tokens", "token", "omega_tokens", "vggt_tokens", "register_tokens"],
+            "patch_tokens": ["patch_tokens", "patch_token", "omega_patch_tokens", "vggt_patch_tokens"],
         }[kind]
         names = [f"{idx}.npy", f"{raw_idx}.npy"]
         for alias in aliases:
@@ -172,7 +238,25 @@ class OmegaPriorCache:
             return ["depths", "depth", "omega_depths", ""]
         if kind == "confidence":
             return ["confidences", "confidence", "conf", "omega_confidences", ""]
+        if kind == "tokens":
+            return ["tokens", "register_tokens", "omega_tokens", ""]
+        if kind == "patch_tokens":
+            return ["patch_tokens", "omega_patch_tokens", "dense_tokens", ""]
         return ["uncertainties", "uncertainty", "omega_uncertainties", ""]
+
+    def _save_array(self, cache_dir: str, kind: str, frame_idx: int, tensor: Optional[torch.Tensor], overwrite: bool) -> None:
+        if tensor is None:
+            return
+
+        subdir = self._subdirs(kind)[0]
+        out_dir = os.path.join(cache_dir, subdir) if subdir else cache_dir
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{int(frame_idx):05d}.npy")
+        if os.path.exists(path) and not overwrite:
+            return
+
+        array = tensor.detach().float().cpu().numpy()
+        np.save(path, array)
 
     def _load_array(self, path: str) -> torch.Tensor:
         array = np.load(path)

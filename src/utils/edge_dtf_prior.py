@@ -55,8 +55,17 @@ class EdgeDTFPrior:
         dtf = self._distance_transform(edge > 0.0)
         return edge.contiguous(), dtf.contiguous()
 
-    def edge_weight(self, source_edge: torch.Tensor, sampled_target_dtf: torch.Tensor) -> torch.Tensor:
+    def edge_weight(
+        self,
+        source_edge: torch.Tensor,
+        sampled_target_dtf: torch.Tensor,
+        calibration: torch.Tensor = None,
+    ) -> torch.Tensor:
         residual = torch.clamp(source_edge * sampled_target_dtf, 0.0, 1.0)
+        if calibration is not None:
+            residual = residual * calibration.to(device=residual.device, dtype=residual.dtype)
+            residual = torch.clamp(residual, 0.0, 1.0)
+
         power = float(self.cfg.get("residual_power", 1.0))
         if power != 1.0:
             residual = torch.pow(torch.clamp(residual, min=1e-6), power)

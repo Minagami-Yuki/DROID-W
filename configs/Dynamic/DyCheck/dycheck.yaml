@@ -4,8 +4,8 @@ dataset: 'dycheck'
 
 data:
   root_folder: ./datasets/DyCheck
-  output: ./Outputs/DyCheck
-  
+  output: /data1/czy/Output/DROID-omega/DyCheck
+
 cam:  #intrinsic is slightly different per seq
   png_depth_scale: 1.0 #for depth image in npy format
   H: 960
@@ -17,4 +17,3 @@ cam:  #intrinsic is slightly different per seq
   distortion: [0, 0, 0, 0, 0]
   H_out: 480
   W_out: 360
-    

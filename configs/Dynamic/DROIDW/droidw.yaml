@@ -6,7 +6,7 @@ stride: 1
 
 data:
   root_folder: ./datasets/DROID-W
-  output: ./Outputs/DROID-W
+  output: /data1/czy/Output/DROID-omega/DROID-W
 
 cam:
   ### target/output camera settings, camera_size -> resize -> crop -> target_size
@@ -27,4 +27,3 @@ tracking:
   force_keyframe_every_n_frames: -1
   uncertainty_params:
     gamma_depth: 0.01
-

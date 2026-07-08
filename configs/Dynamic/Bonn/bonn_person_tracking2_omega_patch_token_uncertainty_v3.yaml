@@ -1,0 +1,30 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking2_omega_token_suppression.yaml
+scene: bonn_person_tracking2_omega_patch_token_uncertainty_v3
+
+omega_prior:
+  source: cache
+  cache_dir: /data1/czy/Output/DROID-omega/cache/Bonn/bonn_person_tracking2
+  missing_policy: error
+  model:
+    patch_tokens:
+      enable: True
+      dim: 8
+      projection: group_mean
+      normalize: True
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    enable: True
+    token_dim: 8
+    min_distance: 0.05
+    max_distance: 0.60
+    strength: 0.001
+    min_scale: 0.999
+    max_scale: 1.0
+    combine_with_omega_uncertainty: False
+    omega_weight: 0.0
+    omega_min_uncertainty: 0.78
+    omega_max_uncertainty: 1.0
+    combine_with_edge_residual: False
+    edge_weight: 0.0
+    normalize_components: True

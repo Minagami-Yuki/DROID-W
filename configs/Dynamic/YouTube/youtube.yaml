@@ -3,8 +3,8 @@ inherit_from: ./configs/droid_w.yaml
 dataset: 'youtube'
 
 data:
-  root_folder: ./datasets/YouTube
-  output: ./Outputs/YouTube
+  root_folder: /data1/czy/datasets/YouTube
+  output: /data1/czy/Output/DROID-omega/YouTube
   
 cam:  #intrinsic is slightly different per seq
   png_depth_scale: 1.0 #for depth image in npy format

@@ -1,0 +1,19 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking2_omega_edge_dtf015_cycle008_soft050.yaml
+scene: bonn_person_tracking2_omega_token_suppression
+
+edge_dtf_prior:
+  token_calibration:
+    enable: False
+  token_dynamic_suppression:
+    enable: True
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    strength: 0.03
+    min_scale: 0.97
+    max_scale: 1.0
+    hard_threshold: null
+    hard_scale: 0.95

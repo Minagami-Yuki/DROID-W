@@ -160,6 +160,15 @@ omega_prior:
   enable: False
   source: cache # cache | model | auto
   cache_dir: null
+  cache:
+    write: False
+    output_dir: null
+    overwrite: False
+    save_depth: True
+    save_confidence: True
+    save_uncertainty: True
+    save_tokens: True
+    save_patch_tokens: True
   missing_policy: warn # warn | ignore | error
   depth:
     enable: False
@@ -204,11 +213,16 @@ omega_prior:
     save_raw_npy: False
   model:
     repo_path: thirdparty/vggt-omega
-    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    checkpoint: /data1/czy/Output/DROID-omega/vggt_omega_1b_512.pt
     image_resolution: 512
     preprocess_mode: balanced # balanced | max_size
     patch_size: 16
     device: null
+    patch_tokens:
+      enable: False
+      dim: 8
+      projection: group_mean # group_mean | first
+      normalize: True
 
 edge_dtf_prior:
   enable: False
@@ -233,9 +247,129 @@ edge_dtf_prior:
     min_mean_residual: 0.0
     max_mean_residual: 1.0
     min_edge_mass: 16.0
+  token_calibration:
+    enable: False
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    mode: amplify # amplify | attenuate
+    strength: 0.10
+    min_scale: 1.0
+    max_scale: 1.15
+  token_dynamic_suppression:
+    enable: False
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    strength: 0.03
+    min_scale: 0.97
+    max_scale: 1.0
+    hard_threshold: null
+    hard_scale: 0.95
+  token_spatial_suppression:
+    enable: False
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    use_omega_uncertainty: True
+    omega_weight: 1.0
+    omega_min_uncertainty: 0.78
+    omega_max_uncertainty: 1.0
+    use_edge_residual: True
+    edge_weight: 0.5
+    normalize_components: True
+    strength: 0.03
+    min_scale: 0.97
+    max_scale: 1.0
+  patch_token_uncertainty:
+    enable: False
+    token_dim: 8
+    min_distance: 0.05
+    max_distance: 0.60
+    strength: 0.03
+    min_scale: 0.97
+    max_scale: 1.0
+    combine_with_omega_uncertainty: True
+    omega_weight: 0.25
+    omega_min_uncertainty: 0.78
+    omega_max_uncertainty: 1.0
+    combine_with_edge_residual: False
+    edge_weight: 0.25
+    normalize_components: True
+    conditional_gate:
+      enable: False
+      mode: multiply # multiply | hard
+      min_gate: 0.0
+      hard_threshold: 0.5
+      use_omega_uncertainty: True
+      omega_weight: 1.0
+      omega_min_uncertainty: 0.82
+      omega_max_uncertainty: 1.0
+      use_edge_residual: True
+      edge_weight: 1.0
+      edge_min_residual: 0.05
+      edge_max_residual: 0.40
+      normalize_components: True
+      evidence_floor:
+        enable: False
+        signal: gate_max # gate_max | gate_mean
+        threshold: 0.90
+        fallback_min_gate: 0.0
+    adaptive_strength:
+      enable: False
+      signal: gate_mean # gate_mean | risk_mean
+      min_signal: 0.35
+      max_signal: 0.70
+      min_multiplier: 0.55
+      max_multiplier: 1.10
+    debug_stats:
+      enable: False
+      every_n_calls: 1
+      max_edges_per_call: 64
+      output_name: patch_token_uncertainty_stats.csv
+  per_edge_covariance:
+    enable: False
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    use_token_distance: True
+    token_weight: 1.0
+    use_omega_uncertainty: True
+    omega_weight: 1.0
+    omega_min_uncertainty: 0.78
+    omega_max_uncertainty: 1.0
+    use_edge_residual: True
+    edge_weight: 0.5
+    normalize_components: True
+    strength: 0.04
+    reliable_boost: 0.0
+    min_scale: 0.96
+    max_scale: 1.0
+
+point_cloud:
+  save_final: True
+  filename: final_point_cloud.ply
+  depth_source: droid # droid | mono
+  stride: 4
+  max_points_per_frame: 12000
+  min_depth: 0.05
+  max_depth: 20.0
+  use_valid_depth_mask: True
 
 data:
-  output: ./output/wildgs_slam
+  output: /data1/czy/Output/DROID-omega
   input_folder: Please_specify_the_path_to_the_dataset
 
 dataset: 'tumrgbd'

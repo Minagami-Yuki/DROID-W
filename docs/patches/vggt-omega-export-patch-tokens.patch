@@ -1,0 +1,17 @@
+diff --git a/vggt_omega/models/vggt_omega.py b/vggt_omega/models/vggt_omega.py
+index 176ed9d..f2894ae 100644
+--- a/vggt_omega/models/vggt_omega.py
++++ b/vggt_omega/models/vggt_omega.py
+@@ -46,6 +46,12 @@ class VGGTOmega(nn.Module):
+ 
+         predictions = {
+             "camera_and_register_tokens": final_tokens[:, :, :patch_token_start].contiguous(),
++            "patch_tokens": final_tokens[:, :, patch_token_start:].contiguous(),
++            "patch_grid_size": torch.tensor(
++                [images.shape[-2] // self.aggregator.patch_size, images.shape[-1] // self.aggregator.patch_size],
++                device=images.device,
++                dtype=torch.long,
++            ),
+         }
+         with torch.autocast(device_type="cuda", enabled=False):
+             if self.camera_head is not None:

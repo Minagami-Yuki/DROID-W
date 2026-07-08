@@ -17,6 +17,7 @@ from src.utils.omega_prior import OmegaPriorCache
 from src.utils.edge_dtf_prior import EdgeDTFPrior
 import matplotlib.pyplot as plt
 import os
+import csv
 from src.utils.sys_timer import timer
 import PIL
 import PIL.Image as Image
@@ -73,6 +74,17 @@ class DepthVideo:
         self.edge_dtf_edges = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.edge_dtf_maps = torch.ones(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.edge_dtf_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        token_cfg = self._omega_token_buffer_cfg()
+        self.omega_token_count = int(token_cfg.get("max_tokens", 17))
+        self.omega_token_dim = int(token_cfg.get("token_dim", 2048))
+        self.omega_tokens = torch.zeros(buffer, self.omega_token_count, self.omega_token_dim, device=self.device, dtype=torch.float).share_memory_()
+        self.omega_token_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        patch_token_cfg = self._omega_patch_token_buffer_cfg()
+        self.omega_patch_token_dim = int(patch_token_cfg.get("token_dim", 8))
+        self.omega_patch_maps = torch.zeros(buffer, self.omega_patch_token_dim, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
+        self.omega_patch_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        self._patch_token_stats_call = 0
+        self._patch_token_stats_header_written = False
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
@@ -232,6 +244,47 @@ class DepthVideo:
         else:
             self.omega_uncertainties[index] = 1.0
             self.omega_uncertainty_valid[index] = False
+
+        if len(item) > 11 and item[11] is not None:
+            omega_tokens = item[11].to(self.device, dtype=torch.float32)
+            if omega_tokens.ndim == 1:
+                omega_tokens = omega_tokens[None]
+            if omega_tokens.ndim > 2:
+                omega_tokens = omega_tokens.reshape(-1, omega_tokens.shape[-1])
+            if omega_tokens.ndim != 2:
+                raise ValueError(f"Expected Omega tokens [T,C], got {tuple(omega_tokens.shape)}")
+
+            self.omega_tokens[index].zero_()
+            token_count = min(self.omega_token_count, omega_tokens.shape[0])
+            token_dim = min(self.omega_token_dim, omega_tokens.shape[1])
+            self.omega_tokens[index, :token_count, :token_dim] = omega_tokens[:token_count, :token_dim]
+            self.omega_token_valid[index] = True
+        else:
+            self.omega_tokens[index].zero_()
+            self.omega_token_valid[index] = False
+
+        if len(item) > 12 and item[12] is not None:
+            omega_patch_map = item[12].to(self.device, dtype=torch.float32)
+            if omega_patch_map.ndim != 3:
+                raise ValueError(f"Expected Omega patch token map [C,H,W] or [H,W,C], got {tuple(omega_patch_map.shape)}")
+            if omega_patch_map.shape[0] != self.omega_patch_token_dim and omega_patch_map.shape[-1] == self.omega_patch_token_dim:
+                omega_patch_map = omega_patch_map.permute(2, 0, 1).contiguous()
+            if omega_patch_map.shape[0] != self.omega_patch_token_dim:
+                raise ValueError(
+                    f"Expected Omega patch token dim {self.omega_patch_token_dim}, got {tuple(omega_patch_map.shape)}"
+                )
+            if tuple(omega_patch_map.shape[-2:]) != (self.ht//self.down_scale, self.wd//self.down_scale):
+                omega_patch_map = F.interpolate(
+                    omega_patch_map[None],
+                    size=(self.ht//self.down_scale, self.wd//self.down_scale),
+                    mode='bilinear',
+                    align_corners=False,
+                )[0]
+            self.omega_patch_maps[index] = F.normalize(omega_patch_map, p=2, dim=0, eps=1e-6)
+            self.omega_patch_valid[index] = True
+        else:
+            self.omega_patch_maps[index].zero_()
+            self.omega_patch_valid[index] = False
 
     def __setitem__(self, index, item):
         with self.get_lock():
@@ -473,7 +526,32 @@ class DepthVideo:
             coords=coords,
             valid_mask=valid_mask,
         )
-        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
+        calibration = self.edge_dtf_token_calibration(ii, jj, source_edge)
+        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf, calibration=calibration)
+        edge_weight = edge_weight * self.edge_dtf_token_dynamic_suppression(ii, jj, edge_weight)
+        edge_weight = edge_weight * self.edge_dtf_token_spatial_suppression(
+            ii,
+            jj,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
+        edge_weight = edge_weight * self.edge_dtf_patch_token_uncertainty(
+            ii,
+            jj,
+            coords,
+            valid_mask,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
+        edge_weight = edge_weight * self.edge_dtf_per_edge_covariance(
+            ii,
+            jj,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
         return (weight * edge_weight[:, None]).contiguous()
 
     def edge_dtf_weight_from_coords(self, ii, jj, coords):
@@ -482,8 +560,553 @@ class DepthVideo:
 
         source_edge, residual_dtf = self.edge_dtf_residual_from_coords(ii, jj, coords)
         source_edge = self.apply_edge_dtf_cycle_gate(ii, jj, source_edge, residual_dtf, coords=coords)
-        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf)
+        calibration = self.edge_dtf_token_calibration(ii, jj, source_edge)
+        edge_weight = self.edge_dtf_prior.edge_weight(source_edge, residual_dtf, calibration=calibration)
+        edge_weight = edge_weight * self.edge_dtf_token_dynamic_suppression(ii, jj, edge_weight)
+        edge_weight = edge_weight * self.edge_dtf_token_spatial_suppression(
+            ii,
+            jj,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
+        edge_weight = edge_weight * self.edge_dtf_patch_token_uncertainty(
+            ii,
+            jj,
+            coords,
+            None,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
+        edge_weight = edge_weight * self.edge_dtf_per_edge_covariance(
+            ii,
+            jj,
+            source_edge,
+            residual_dtf,
+            edge_weight,
+        )
         return edge_weight[None, ..., None].contiguous()
+
+    def _omega_token_buffer_cfg(self):
+        token_cfg = {}
+        for key in ("token_calibration", "token_dynamic_suppression", "token_spatial_suppression", "per_edge_covariance"):
+            cfg = self.edge_dtf_prior.cfg.get(key, {}) or {}
+            if cfg:
+                token_cfg.update({
+                    "max_tokens": cfg.get("max_tokens", token_cfg.get("max_tokens", 17)),
+                    "token_dim": cfg.get("token_dim", token_cfg.get("token_dim", 2048)),
+                })
+        return token_cfg
+
+    def _omega_patch_token_buffer_cfg(self):
+        edge_cfg = self.edge_dtf_prior.cfg.get("patch_token_uncertainty", {}) or {}
+        model_cfg = ((self.cfg.get("omega_prior", {}) or {}).get("model", {}) or {}).get("patch_tokens", {}) or {}
+        return {
+            "token_dim": edge_cfg.get("token_dim", model_cfg.get("dim", 8)),
+        }
+
+    def edge_dtf_token_calibration(self, ii, jj, reference):
+        token_cfg = self.edge_dtf_prior.cfg.get("token_calibration", {}) or {}
+        if not bool(token_cfg.get("enable", False)):
+            return None
+
+        token_distance, valid = self.edge_dtf_token_distance(ii, jj, token_cfg)
+        if token_distance is None:
+            return torch.ones_like(reference)
+
+        min_distance = float(token_cfg.get("min_distance", 0.02))
+        max_distance = float(token_cfg.get("max_distance", 0.20))
+        denom = max(max_distance - min_distance, 1e-6)
+        calibrated = torch.clamp((token_distance - min_distance) / denom, 0.0, 1.0)
+
+        strength = float(token_cfg.get("strength", 0.10))
+        mode = token_cfg.get("mode", "amplify")
+        if mode == "attenuate":
+            scale = 1.0 - strength * calibrated
+        elif mode == "amplify":
+            scale = 1.0 + strength * calibrated
+        else:
+            raise ValueError(f"edge_dtf_prior.token_calibration.mode must be 'amplify' or 'attenuate', got {mode}")
+        scale = torch.clamp(
+            scale,
+            min=float(token_cfg.get("min_scale", 1.0)),
+            max=float(token_cfg.get("max_scale", 1.15)),
+        ).view(-1, 1, 1)
+
+        scale = torch.where(valid, scale, torch.ones_like(scale))
+        return torch.ones_like(reference) * scale
+
+    def edge_dtf_token_dynamic_suppression(self, ii, jj, reference):
+        suppress_cfg = self.edge_dtf_prior.cfg.get("token_dynamic_suppression", {}) or {}
+        if not bool(suppress_cfg.get("enable", False)):
+            return torch.ones_like(reference)
+
+        token_distance, valid = self.edge_dtf_token_distance(ii, jj, suppress_cfg)
+        if token_distance is None:
+            return torch.ones_like(reference)
+
+        min_distance = float(suppress_cfg.get("min_distance", 0.02))
+        max_distance = float(suppress_cfg.get("max_distance", 0.20))
+        denom = max(max_distance - min_distance, 1e-6)
+        dynamic_score = torch.clamp((token_distance - min_distance) / denom, 0.0, 1.0)
+
+        strength = float(suppress_cfg.get("strength", 0.05))
+        scale = 1.0 - strength * dynamic_score
+        scale = torch.clamp(
+            scale,
+            min=float(suppress_cfg.get("min_scale", 0.95)),
+            max=float(suppress_cfg.get("max_scale", 1.0)),
+        ).view(-1, 1, 1)
+
+        hard_threshold = suppress_cfg.get("hard_threshold", None)
+        if hard_threshold is not None:
+            hard_scale = float(suppress_cfg.get("hard_scale", scale.min().item()))
+            hard_mask = (token_distance >= float(hard_threshold)).view(-1, 1, 1)
+            scale = torch.where(hard_mask, torch.full_like(scale, hard_scale), scale)
+
+        scale = torch.where(valid, scale, torch.ones_like(scale))
+        return torch.ones_like(reference) * scale
+
+    def edge_dtf_token_spatial_suppression(self, ii, jj, source_edge, residual_dtf, reference):
+        spatial_cfg = self.edge_dtf_prior.cfg.get("token_spatial_suppression", {}) or {}
+        if not bool(spatial_cfg.get("enable", False)):
+            return torch.ones_like(reference)
+
+        token_distance, valid = self.edge_dtf_token_distance(ii, jj, spatial_cfg)
+        if token_distance is None:
+            return torch.ones_like(reference)
+
+        min_distance = float(spatial_cfg.get("min_distance", 0.02))
+        max_distance = float(spatial_cfg.get("max_distance", 0.20))
+        denom = max(max_distance - min_distance, 1e-6)
+        token_score = torch.clamp((token_distance - min_distance) / denom, 0.0, 1.0)
+        token_score = torch.where(valid.view(-1), token_score, torch.zeros_like(token_score)).view(-1, 1, 1)
+
+        pixel_score = torch.zeros_like(reference)
+        total = 0.0
+
+        if bool(spatial_cfg.get("use_edge_residual", True)):
+            edge_component = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            edge_weight = float(spatial_cfg.get("edge_weight", 0.5))
+            pixel_score = pixel_score + edge_weight * edge_component
+            total += edge_weight
+
+        if bool(spatial_cfg.get("use_omega_uncertainty", True)):
+            omega_valid = (self.omega_uncertainty_valid[ii] & self.omega_uncertainty_valid[jj])
+            if omega_valid.any():
+                omega_uncertainty = 0.5 * (self.omega_uncertainties[ii] + self.omega_uncertainties[jj])
+                min_uncertainty = float(spatial_cfg.get("omega_min_uncertainty", 0.78))
+                max_uncertainty = float(spatial_cfg.get("omega_max_uncertainty", 1.0))
+                denom = max(max_uncertainty - min_uncertainty, 1e-6)
+                omega_score = torch.clamp((omega_uncertainty - min_uncertainty) / denom, 0.0, 1.0)
+                omega_score = torch.where(
+                    omega_valid.view(-1, 1, 1),
+                    omega_score,
+                    torch.zeros_like(omega_score),
+                )
+                omega_weight = float(spatial_cfg.get("omega_weight", 1.0))
+                pixel_score = pixel_score + omega_weight * omega_score
+                total += omega_weight
+
+        if total <= 0.0:
+            return torch.ones_like(reference)
+
+        if bool(spatial_cfg.get("normalize_components", True)):
+            pixel_score = pixel_score / max(total, 1e-6)
+
+        dynamic_score = token_score * torch.clamp(pixel_score, 0.0, 1.0)
+        scale = 1.0 - float(spatial_cfg.get("strength", 0.03)) * dynamic_score
+        return torch.clamp(
+            scale,
+            min=float(spatial_cfg.get("min_scale", 0.97)),
+            max=float(spatial_cfg.get("max_scale", 1.0)),
+        )
+
+    def edge_dtf_patch_token_uncertainty(self, ii, jj, coords, valid_mask, source_edge, residual_dtf, reference):
+        patch_cfg = self.edge_dtf_prior.cfg.get("patch_token_uncertainty", {}) or {}
+        if not bool(patch_cfg.get("enable", False)):
+            return torch.ones_like(reference)
+        if coords is None:
+            return torch.ones_like(reference)
+
+        valid_pair = (self.omega_patch_valid[ii] & self.omega_patch_valid[jj]).view(-1, 1, 1)
+        if not valid_pair.any():
+            return torch.ones_like(reference)
+
+        coords_ = coords.squeeze(0)
+        valid_mask_ = None
+        if valid_mask is not None:
+            valid_mask_ = valid_mask.squeeze(0).squeeze(-1).bool()
+
+        target_patch_maps = self.omega_patch_maps[jj]
+        sampled_target, sample_valid = self.project_images_with_mask(target_patch_maps, coords_, valid_mask_)
+        source_patch = self.omega_patch_maps[ii]
+
+        source_patch = F.normalize(source_patch, p=2, dim=1, eps=1e-6)
+        sampled_target = F.normalize(sampled_target, p=2, dim=1, eps=1e-6)
+        token_distance = 1.0 - (source_patch * sampled_target).sum(dim=1)
+        token_distance = torch.clamp(token_distance, min=0.0)
+
+        valid_pixel = sample_valid & valid_pair
+        token_distance = torch.where(valid_pixel, token_distance, torch.zeros_like(token_distance))
+
+        min_distance = float(patch_cfg.get("min_distance", 0.05))
+        max_distance = float(patch_cfg.get("max_distance", 0.60))
+        denom = max(max_distance - min_distance, 1e-6)
+        risk = torch.clamp((token_distance - min_distance) / denom, 0.0, 1.0)
+        total = 1.0
+
+        if bool(patch_cfg.get("combine_with_omega_uncertainty", True)):
+            omega_valid = (self.omega_uncertainty_valid[ii] & self.omega_uncertainty_valid[jj]).view(-1, 1, 1)
+            if omega_valid.any():
+                omega_uncertainty = 0.5 * (self.omega_uncertainties[ii] + self.omega_uncertainties[jj])
+                min_uncertainty = float(patch_cfg.get("omega_min_uncertainty", 0.78))
+                max_uncertainty = float(patch_cfg.get("omega_max_uncertainty", 1.0))
+                omega_score = torch.clamp(
+                    (omega_uncertainty - min_uncertainty) / max(max_uncertainty - min_uncertainty, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                omega_weight = float(patch_cfg.get("omega_weight", 0.25))
+                risk = risk + omega_weight * torch.where(omega_valid, omega_score, torch.zeros_like(omega_score))
+                total += omega_weight
+
+        if bool(patch_cfg.get("combine_with_edge_residual", False)):
+            edge_weight = float(patch_cfg.get("edge_weight", 0.25))
+            risk = risk + edge_weight * torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            total += edge_weight
+
+        if bool(patch_cfg.get("normalize_components", True)):
+            risk = risk / max(total, 1e-6)
+
+        gate_for_adaptive = None
+        gate_cfg = patch_cfg.get("conditional_gate", {}) or {}
+        if bool(gate_cfg.get("enable", False)):
+            gate = torch.zeros_like(reference)
+            gate_total = 0.0
+
+            if bool(gate_cfg.get("use_omega_uncertainty", True)):
+                omega_valid = (self.omega_uncertainty_valid[ii] & self.omega_uncertainty_valid[jj]).view(-1, 1, 1)
+                if omega_valid.any():
+                    omega_uncertainty = 0.5 * (self.omega_uncertainties[ii] + self.omega_uncertainties[jj])
+                    min_uncertainty = float(gate_cfg.get("omega_min_uncertainty", patch_cfg.get("omega_min_uncertainty", 0.82)))
+                    max_uncertainty = float(gate_cfg.get("omega_max_uncertainty", patch_cfg.get("omega_max_uncertainty", 1.0)))
+                    omega_gate = torch.clamp(
+                        (omega_uncertainty - min_uncertainty) / max(max_uncertainty - min_uncertainty, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    omega_weight = float(gate_cfg.get("omega_weight", 1.0))
+                    gate = gate + omega_weight * torch.where(omega_valid, omega_gate, torch.zeros_like(omega_gate))
+                    gate_total += omega_weight
+
+            if bool(gate_cfg.get("use_edge_residual", True)):
+                edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+                min_residual = float(gate_cfg.get("edge_min_residual", 0.05))
+                max_residual = float(gate_cfg.get("edge_max_residual", 0.40))
+                edge_gate = torch.clamp(
+                    (edge_residual - min_residual) / max(max_residual - min_residual, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                edge_weight = float(gate_cfg.get("edge_weight", 1.0))
+                gate = gate + edge_weight * edge_gate
+                gate_total += edge_weight
+
+            if gate_total <= 0.0:
+                return torch.ones_like(reference)
+
+            if bool(gate_cfg.get("normalize_components", True)):
+                gate = gate / max(gate_total, 1e-6)
+
+            min_gate = float(gate_cfg.get("min_gate", 0.0))
+            evidence_floor_cfg = gate_cfg.get("evidence_floor", {}) or {}
+            if bool(evidence_floor_cfg.get("enable", False)) and min_gate > 0.0:
+                signal_name = evidence_floor_cfg.get("signal", "gate_max")
+                if signal_name == "gate_max":
+                    floor_signal = gate.amax(dim=(1, 2), keepdim=True)
+                elif signal_name == "gate_mean":
+                    floor_signal = gate.mean(dim=(1, 2), keepdim=True)
+                else:
+                    raise ValueError(
+                        f"edge_dtf_prior.patch_token_uncertainty.conditional_gate."
+                        f"evidence_floor.signal must be 'gate_max' or 'gate_mean', got {signal_name}"
+                    )
+                fallback_min_gate = float(evidence_floor_cfg.get("fallback_min_gate", 0.0))
+                threshold = float(evidence_floor_cfg.get("threshold", 0.90))
+                floor = torch.where(
+                    floor_signal >= threshold,
+                    torch.full_like(floor_signal, min_gate),
+                    torch.full_like(floor_signal, fallback_min_gate),
+                )
+                gate = torch.maximum(gate, floor)
+                gate = torch.clamp(gate, max=1.0)
+            else:
+                gate = torch.clamp(gate, min=min_gate, max=1.0)
+            gate_for_adaptive = gate
+            mode = gate_cfg.get("mode", "multiply")
+            if mode == "multiply":
+                risk = risk * gate
+            elif mode == "hard":
+                risk = torch.where(
+                    gate >= float(gate_cfg.get("hard_threshold", 0.5)),
+                    risk,
+                    torch.zeros_like(risk),
+                )
+            else:
+                raise ValueError(
+                    f"edge_dtf_prior.patch_token_uncertainty.conditional_gate.mode "
+                    f"must be 'multiply' or 'hard', got {mode}"
+                )
+
+        strength = float(patch_cfg.get("strength", 0.03))
+        adaptive_cfg = patch_cfg.get("adaptive_strength", {}) or {}
+        if bool(adaptive_cfg.get("enable", False)):
+            signal_name = adaptive_cfg.get("signal", "gate_mean")
+            if signal_name == "gate_mean" and gate_for_adaptive is not None:
+                signal = gate_for_adaptive.mean(dim=(1, 2), keepdim=True)
+            elif signal_name == "risk_mean":
+                signal = torch.clamp(risk, 0.0, 1.0).mean(dim=(1, 2), keepdim=True)
+            else:
+                raise ValueError(
+                    f"edge_dtf_prior.patch_token_uncertainty.adaptive_strength.signal "
+                    f"must be 'gate_mean' or 'risk_mean', got {signal_name}"
+                )
+
+            min_signal = float(adaptive_cfg.get("min_signal", 0.35))
+            max_signal = float(adaptive_cfg.get("max_signal", 0.70))
+            signal = torch.clamp(
+                (signal - min_signal) / max(max_signal - min_signal, 1e-6),
+                0.0,
+                1.0,
+            )
+            min_multiplier = float(adaptive_cfg.get("min_multiplier", 0.55))
+            max_multiplier = float(adaptive_cfg.get("max_multiplier", 1.10))
+            strength = strength * (min_multiplier + (max_multiplier - min_multiplier) * signal)
+
+        scale = 1.0 - strength * torch.clamp(risk, 0.0, 1.0)
+        scale = torch.clamp(
+            scale,
+            min=float(patch_cfg.get("min_scale", 0.97)),
+            max=float(patch_cfg.get("max_scale", 1.0)),
+        )
+        self._write_patch_token_uncertainty_stats(
+            patch_cfg,
+            ii,
+            jj,
+            valid_pixel,
+            token_distance,
+            risk,
+            gate_for_adaptive,
+            source_edge,
+            residual_dtf,
+            scale,
+            strength,
+        )
+        return scale
+
+    def _write_patch_token_uncertainty_stats(
+        self,
+        patch_cfg,
+        ii,
+        jj,
+        valid_pixel,
+        token_distance,
+        risk,
+        gate,
+        source_edge,
+        residual_dtf,
+        scale,
+        strength,
+    ):
+        stats_cfg = patch_cfg.get("debug_stats", {}) or {}
+        if not bool(stats_cfg.get("enable", False)):
+            return
+
+        self._patch_token_stats_call += 1
+        every_n_calls = max(int(stats_cfg.get("every_n_calls", 1)), 1)
+        if self._patch_token_stats_call % every_n_calls != 0:
+            return
+
+        max_edges = max(int(stats_cfg.get("max_edges_per_call", 64)), 1)
+        count = min(int(risk.shape[0]), max_edges)
+        if count <= 0:
+            return
+
+        out_dir = os.path.join(self.output, "debug")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, stats_cfg.get("output_name", "patch_token_uncertainty_stats.csv"))
+
+        values = {
+            "token_distance": token_distance[:count].detach().float(),
+            "risk": torch.clamp(risk[:count].detach().float(), 0.0, 1.0),
+            "source_edge": source_edge[:count].detach().float(),
+            "residual_dtf": residual_dtf[:count].detach().float(),
+            "scale": scale[:count].detach().float(),
+        }
+        if gate is not None:
+            values["gate"] = gate[:count].detach().float()
+
+        mask = valid_pixel[:count].detach().bool()
+        flat_mask = mask.reshape(count, -1)
+        denom = flat_mask.sum(dim=1).clamp(min=1).float()
+        valid_ratio = flat_mask.float().mean(dim=1)
+
+        def masked_mean(name):
+            val = values[name].reshape(count, -1)
+            return (val * flat_mask.float()).sum(dim=1) / denom
+
+        def masked_max(name):
+            val = values[name].reshape(count, -1)
+            return torch.where(flat_mask, val, torch.zeros_like(val)).max(dim=1).values
+
+        ii_cpu = ii[:count].detach().cpu().tolist()
+        jj_cpu = jj[:count].detach().cpu().tolist()
+        rows = []
+        strength_tensor = strength.detach().flatten() if torch.is_tensor(strength) else None
+        for k in range(count):
+            if strength_tensor is not None:
+                strength_value = float(strength_tensor[min(k, strength_tensor.numel() - 1)].cpu())
+            else:
+                strength_value = float(strength)
+            row = {
+                "call": self._patch_token_stats_call,
+                "edge_local_index": k,
+                "ii": int(ii_cpu[k]),
+                "jj": int(jj_cpu[k]),
+                "valid_ratio": float(valid_ratio[k].cpu()),
+                "token_distance_mean": float(masked_mean("token_distance")[k].cpu()),
+                "token_distance_max": float(masked_max("token_distance")[k].cpu()),
+                "risk_mean": float(masked_mean("risk")[k].cpu()),
+                "risk_max": float(masked_max("risk")[k].cpu()),
+                "source_edge_mean": float(masked_mean("source_edge")[k].cpu()),
+                "residual_dtf_mean": float(masked_mean("residual_dtf")[k].cpu()),
+                "scale_mean": float(masked_mean("scale")[k].cpu()),
+                "scale_min": float(torch.where(flat_mask[k], values["scale"][k].reshape(-1), torch.ones_like(values["scale"][k].reshape(-1))).min().cpu()),
+                "strength": strength_value,
+            }
+            if "gate" in values:
+                row["gate_mean"] = float(masked_mean("gate")[k].cpu())
+                row["gate_max"] = float(masked_max("gate")[k].cpu())
+            else:
+                row["gate_mean"] = ""
+                row["gate_max"] = ""
+            rows.append(row)
+
+        fieldnames = [
+            "call",
+            "edge_local_index",
+            "ii",
+            "jj",
+            "valid_ratio",
+            "token_distance_mean",
+            "token_distance_max",
+            "risk_mean",
+            "risk_max",
+            "gate_mean",
+            "gate_max",
+            "source_edge_mean",
+            "residual_dtf_mean",
+            "scale_mean",
+            "scale_min",
+            "strength",
+        ]
+        file_exists = os.path.exists(out_path)
+        with open(out_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists and not self._patch_token_stats_header_written:
+                writer.writeheader()
+            writer.writerows(rows)
+        self._patch_token_stats_header_written = True
+
+    def edge_dtf_per_edge_covariance(self, ii, jj, source_edge, residual_dtf, reference):
+        cov_cfg = self.edge_dtf_prior.cfg.get("per_edge_covariance", {}) or {}
+        if not bool(cov_cfg.get("enable", False)):
+            return torch.ones_like(reference)
+
+        risk = torch.zeros_like(reference)
+        total = 0.0
+
+        if bool(cov_cfg.get("use_edge_residual", True)):
+            edge_component = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            edge_weight = float(cov_cfg.get("edge_weight", 0.5))
+            risk = risk + edge_weight * edge_component
+            total += edge_weight
+
+        if bool(cov_cfg.get("use_token_distance", True)):
+            token_distance, valid = self.edge_dtf_token_distance(ii, jj, cov_cfg)
+            if token_distance is not None:
+                min_distance = float(cov_cfg.get("min_distance", 0.02))
+                max_distance = float(cov_cfg.get("max_distance", 0.20))
+                denom = max(max_distance - min_distance, 1e-6)
+                token_score = torch.clamp((token_distance - min_distance) / denom, 0.0, 1.0)
+                token_score = torch.where(valid.view(-1), token_score, torch.zeros_like(token_score))
+                token_weight = float(cov_cfg.get("token_weight", 1.0))
+                risk = risk + token_weight * token_score.view(-1, 1, 1)
+                total += token_weight
+
+        if bool(cov_cfg.get("use_omega_uncertainty", True)):
+            omega_valid = (self.omega_uncertainty_valid[ii] & self.omega_uncertainty_valid[jj])
+            if omega_valid.any():
+                omega_uncertainty = 0.5 * (self.omega_uncertainties[ii] + self.omega_uncertainties[jj])
+                min_uncertainty = float(cov_cfg.get("omega_min_uncertainty", 0.78))
+                max_uncertainty = float(cov_cfg.get("omega_max_uncertainty", 1.0))
+                denom = max(max_uncertainty - min_uncertainty, 1e-6)
+                omega_score = torch.clamp((omega_uncertainty - min_uncertainty) / denom, 0.0, 1.0)
+                omega_score = torch.where(
+                    omega_valid.view(-1, 1, 1),
+                    omega_score,
+                    torch.zeros_like(omega_score),
+                )
+                omega_weight = float(cov_cfg.get("omega_weight", 1.0))
+                risk = risk + omega_weight * omega_score
+                total += omega_weight
+
+        if total <= 0.0:
+            return torch.ones_like(reference)
+
+        if bool(cov_cfg.get("normalize_components", True)):
+            risk = risk / max(total, 1e-6)
+
+        risk = torch.clamp(risk, 0.0, 1.0)
+        strength = float(cov_cfg.get("strength", 0.04))
+        reliable_boost = float(cov_cfg.get("reliable_boost", 0.0))
+        scale = 1.0 - strength * risk
+        if reliable_boost > 0.0:
+            scale = scale + reliable_boost * (1.0 - risk)
+        return torch.clamp(
+            scale,
+            min=float(cov_cfg.get("min_scale", 0.96)),
+            max=float(cov_cfg.get("max_scale", 1.0)),
+        )
+
+    def edge_dtf_token_distance(self, ii, jj, token_cfg):
+        valid = (self.omega_token_valid[ii] & self.omega_token_valid[jj]).view(-1, 1, 1)
+        if not valid.any():
+            return None, valid
+
+        tokens_i = self.omega_tokens[ii].float()
+        tokens_j = self.omega_tokens[jj].float()
+
+        if bool(token_cfg.get("exclude_camera_token", False)) and tokens_i.shape[1] > 1:
+            tokens_i = tokens_i[:, 1:]
+            tokens_j = tokens_j[:, 1:]
+
+        pooling = token_cfg.get("pooling", "mean")
+        if pooling == "max":
+            pooled_i = tokens_i.max(dim=1).values
+            pooled_j = tokens_j.max(dim=1).values
+        elif pooling == "mean":
+            pooled_i = tokens_i.mean(dim=1)
+            pooled_j = tokens_j.mean(dim=1)
+        else:
+            raise ValueError(f"Omega token pooling must be 'mean' or 'max', got {pooling}")
+
+        pooled_i = F.normalize(pooled_i, p=2, dim=-1, eps=1e-6)
+        pooled_j = F.normalize(pooled_j, p=2, dim=-1, eps=1e-6)
+        token_distance = 1.0 - (pooled_i * pooled_j).sum(dim=-1)
+        return torch.clamp(token_distance, min=0.0), valid
 
     def edge_dtf_residual_from_coords(self, ii, jj, coords, valid_mask=None):
         coords_ = coords.squeeze(0)
@@ -1049,6 +1672,8 @@ class DepthVideo:
         droid_disps = self.disps[:self.counter.value].cpu().numpy()
         intrinsics = self.intrinsics[:self.counter.value].cpu().numpy()
         uncertainties = self.uncertainties[:self.counter.value].cpu().numpy()
+        omega_tokens = self.omega_tokens[:self.counter.value].cpu().numpy()
+        omega_token_valid = self.omega_token_valid[:self.counter.value].cpu().numpy()
         np.savez(path,
             timestamps=timestamps,
             images=images,
@@ -1057,7 +1682,9 @@ class DepthVideo:
             droid_disps_up=droid_disps_up,
             droid_disps=droid_disps,
             intrinsics=intrinsics,
-            uncertainties=uncertainties)
+            uncertainties=uncertainties,
+            omega_tokens=omega_tokens,
+            omega_token_valid=omega_token_valid)
         self.printer.print(f"Saved final depth video: {path}",FontColor.INFO)
 
     def save_poses(self,path:str):

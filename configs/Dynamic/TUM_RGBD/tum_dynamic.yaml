@@ -12,7 +12,7 @@ mapping:
 
 data:
   root_folder: ./datasets/TUM_RGBD
-  output: ./Outputs/TUM_RGBD
+  output: /data1/czy/Output/DROID-omega/TUM_RGBD
 
 cam:  #NOTE: intrinsic is different per scene in TUM
   # refer to https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#intrinsic_camera_calibration_of_the_kinect

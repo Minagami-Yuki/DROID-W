@@ -12,6 +12,7 @@ from src.trajectory_filler import PoseTrajectoryFiller
 from src.utils.common import setup_seed, update_cam
 from src.utils.Printer import Printer, FontColor
 from src.utils.eval_traj import kf_traj_eval, full_traj_eval, full_traj_fill
+from src.utils.point_cloud_export import save_final_point_cloud
 from src.utils.datasets import BaseDataset
 from src.tracker import Tracker
 from src.mapper import Mapper
@@ -225,6 +226,11 @@ class SLAM:
                     fast_mode=True,
                 )
             full_traj_eval(traj_est, self.stream, self.printer, self.logger, f"{self.save_dir}/traj", "full_traj")
+
+        try:
+            save_final_point_cloud(self.video, self.save_dir, self.cfg, self.printer)
+        except Exception as e:
+            self.printer.print(f"Final point cloud export failed: {e}", FontColor.ERROR)
 
         self.printer.print("Metrics Evaluation Done!", FontColor.EVAL)
         timer._report_summary(self.save_dir)

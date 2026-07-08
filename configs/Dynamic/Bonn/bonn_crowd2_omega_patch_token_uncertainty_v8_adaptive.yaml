@@ -1,0 +1,12 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v7_softfloor.yaml
+scene: bonn_crowd2_omega_patch_token_uncertainty_v8_adaptive
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    adaptive_strength:
+      enable: True
+      signal: gate_mean
+      min_signal: 0.35
+      max_signal: 0.70
+      min_multiplier: 0.55
+      max_multiplier: 1.10

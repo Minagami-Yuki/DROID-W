@@ -3,7 +3,7 @@ scene: freiburg3_walking_static_omega_edge_dtf015_cycle008_soft050
 
 data:
   input_folder: /data1/czy/datasets/TUM_RGBD/dynamic/rgbd_dataset_freiburg3_walking_static
-  output: ./Outputs/TUM_RGBD
+  output: /data1/czy/Output/DROID-omega/TUM_RGBD
 
 omega_prior:
   enable: True
@@ -23,7 +23,7 @@ omega_prior:
     freeze_droid_uncertainty_update: False
   model:
     repo_path: thirdparty/vggt-omega
-    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    checkpoint: /data1/czy/Output/DROID-omega/vggt_omega_1b_512.pt
     image_resolution: 512
     preprocess_mode: balanced
 

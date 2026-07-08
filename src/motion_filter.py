@@ -89,12 +89,54 @@ class MotionFilter:
 
         omega_depth = None
         omega_uncertainty = None
-        if source in ['model', 'online'] and (depth_enabled or uncertainty_enabled):
-            omega_depth, omega_confidence = self.omega_predictor.predict_frame(image)
-            if uncertainty_enabled:
+        omega_tokens = None
+        omega_patch_map = None
+        tokens_enabled = self._omega_tokens_enabled()
+        patch_tokens_enabled = self._omega_patch_tokens_enabled()
+        cache_cfg = omega_cfg.get("cache", {}) or {}
+        cache_write_enabled = bool(cache_cfg.get("write", False))
+        patch_model_cfg = (omega_cfg.get("model", {}) or {}).get("patch_tokens", {}) or {}
+        tokens_needed = tokens_enabled or (cache_write_enabled and bool(cache_cfg.get("save_tokens", True)))
+        patch_tokens_needed = patch_tokens_enabled or (
+            cache_write_enabled
+            and bool(cache_cfg.get("save_patch_tokens", True))
+            and bool(patch_model_cfg.get("enable", False))
+        )
+        if source in ['model', 'online'] and (depth_enabled or uncertainty_enabled or tokens_needed or patch_tokens_needed or cache_write_enabled):
+            if tokens_needed and patch_tokens_needed:
+                omega_depth, omega_confidence, omega_tokens, omega_patch_map = self.omega_predictor.predict_frame(
+                    image,
+                    return_tokens=True,
+                    return_patch_tokens=True,
+                )
+            elif tokens_needed:
+                omega_depth, omega_confidence, omega_tokens = self.omega_predictor.predict_frame(image, return_tokens=True)
+            elif patch_tokens_needed:
+                omega_depth, omega_confidence, omega_patch_map = self.omega_predictor.predict_frame(image, return_patch_tokens=True)
+            else:
+                omega_depth, omega_confidence = self.omega_predictor.predict_frame(image)
+            if uncertainty_enabled or bool(cache_cfg.get("save_uncertainty", True)):
                 omega_uncertainty = self.omega_prior.confidence_to_uncertainty(omega_confidence)
+            self.omega_prior.save_for_frame(
+                int(tstamp),
+                depth=omega_depth,
+                confidence=omega_confidence,
+                uncertainty=omega_uncertainty,
+                tokens=omega_tokens,
+                patch_map=omega_patch_map,
+            )
+            if not uncertainty_enabled:
+                omega_uncertainty = None
+            if not tokens_enabled:
+                omega_tokens = None
+            if not patch_tokens_enabled:
+                omega_patch_map = None
         else:
             omega_depth, omega_uncertainty = self.omega_prior.load_for_frame(int(tstamp), image_hw)
+            if tokens_enabled:
+                omega_tokens = self.omega_prior.load_tokens_for_frame(int(tstamp))
+            if patch_tokens_enabled:
+                omega_patch_map = self.omega_prior.load_patch_map_for_frame(int(tstamp))
             if not depth_enabled:
                 omega_depth = None
             if not uncertainty_enabled:
@@ -111,7 +153,36 @@ class MotionFilter:
                 mono_depth = torch.where(omega_depth > 0, omega_depth, mono_depth)
 
         self._save_omega_uncertainty_visual(frame_idx, tstamp, omega_uncertainty, keyframe_idx)
-        return mono_depth, omega_uncertainty
+        return mono_depth, omega_uncertainty, omega_tokens, omega_patch_map
+
+    def _omega_tokens_enabled(self):
+        edge_cfg = self.cfg.get("edge_dtf_prior", {}) or {}
+        token_cfg = edge_cfg.get("token_calibration", {}) or {}
+        suppress_cfg = edge_cfg.get("token_dynamic_suppression", {}) or {}
+        spatial_cfg = edge_cfg.get("token_spatial_suppression", {}) or {}
+        covariance_cfg = edge_cfg.get("per_edge_covariance", {}) or {}
+        return bool(
+            edge_cfg.get("enable", False)
+            and (
+                token_cfg.get("enable", False)
+                or suppress_cfg.get("enable", False)
+                or spatial_cfg.get("enable", False)
+                or (
+                    covariance_cfg.get("enable", False)
+                    and covariance_cfg.get("use_token_distance", True)
+                )
+            )
+        )
+
+    def _omega_patch_tokens_enabled(self):
+        edge_cfg = self.cfg.get("edge_dtf_prior", {}) or {}
+        patch_edge_cfg = edge_cfg.get("patch_token_uncertainty", {}) or {}
+        patch_model_cfg = ((self.cfg.get("omega_prior", {}) or {}).get("model", {}) or {}).get("patch_tokens", {}) or {}
+        return bool(
+            edge_cfg.get("enable", False)
+            and patch_edge_cfg.get("enable", False)
+            and patch_model_cfg.get("enable", False)
+        )
 
     def _omega_source(self):
         omega_cfg = self.cfg.get('omega_prior', {}) or {}
@@ -206,7 +277,7 @@ class MotionFilter:
             net, inp = self.__context_encoder(inputs[:,[0]])
             self.net, self.inp, self.fmap = net, inp, gmap
             mono_depth = self._predict_depth_prior(tstamp, image)
-            mono_depth, omega_uncertainty = self._apply_omega_prior(
+            mono_depth, omega_uncertainty, omega_tokens, omega_patch_map = self._apply_omega_prior(
                 tstamp, mono_depth, image, frame_idx=frame_idx, keyframe_idx=self.video.counter.value)
             if self.uncertainty_aware:
                 dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
@@ -215,7 +286,7 @@ class MotionFilter:
                 if self.cfg['mapping']["uncertainty_params"]['activate']:
                     # If mapping needs dino features, we predict here and store the value in local disk
                     _ = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=True)
-            self.video.append(tstamp, image[0], Id, 1.0, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0,0], inp[0,0], dino_features, omega_uncertainty)
+            self.video.append(tstamp, image[0], Id, 1.0, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0,0], inp[0,0], dino_features, omega_uncertainty, omega_tokens, omega_patch_map)
         ### only add new frame if there is enough motion ###
         else:                
             # index correlation volume
@@ -237,7 +308,7 @@ class MotionFilter:
                 net, inp = self.__context_encoder(inputs[:,[0]])
                 self.net, self.inp, self.fmap = net, inp, gmap
                 mono_depth = self._predict_depth_prior(tstamp, image)
-                mono_depth, omega_uncertainty = self._apply_omega_prior(
+                mono_depth, omega_uncertainty, omega_tokens, omega_patch_map = self._apply_omega_prior(
                     tstamp, mono_depth, image, frame_idx=frame_idx, keyframe_idx=self.video.counter.value)
                 if self.uncertainty_aware:
                     dino_features = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=self.cfg['mono_prior']['save_feature'])
@@ -247,7 +318,7 @@ class MotionFilter:
                         # if mapping needs dino features, we predict here and store the value in local disk
                         _ = predict_img_features(self.feat_extractor,tstamp,image,self.cfg,self.device,save_feat=True)
                 # add new frame to video, all params
-                self.video.append(tstamp, image[0], None, None, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0], inp[0], dino_features, omega_uncertainty)     # video.counter += 1
+                self.video.append(tstamp, image[0], None, None, mono_depth, intrinsics / float(self.video.down_scale), gmap, net[0], inp[0], dino_features, omega_uncertainty, omega_tokens, omega_patch_map)     # video.counter += 1
                 # gmap: torch.Size([1, 128, 45, 80]) net[0]: [128, 45, 80] inp: [1, 128, 45, 80], dino_features: [25, 45, 384]
             else:
                 self.count += 1

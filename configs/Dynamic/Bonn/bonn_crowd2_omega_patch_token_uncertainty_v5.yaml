@@ -1,0 +1,7 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v3.yaml
+scene: bonn_crowd2_omega_patch_token_uncertainty_v5
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    strength: 0.0005
+    min_scale: 0.9995

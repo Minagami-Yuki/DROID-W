@@ -1,0 +1,11 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v7_softfloor.yaml
+scene: bonn_person_tracking_omega_patch_token_uncertainty_v11_evidence_floor020
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    conditional_gate:
+      evidence_floor:
+        enable: True
+        signal: gate_max
+        threshold: 0.90
+        fallback_min_gate: 0.20

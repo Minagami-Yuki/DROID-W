@@ -1,0 +1,22 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking_omega_token_suppression.yaml
+scene: bonn_person_tracking_omega_token_spatial_v2
+
+edge_dtf_prior:
+  token_spatial_suppression:
+    enable: True
+    max_tokens: 17
+    token_dim: 2048
+    exclude_camera_token: False
+    pooling: mean
+    min_distance: 0.02
+    max_distance: 0.20
+    use_omega_uncertainty: True
+    omega_weight: 0.75
+    omega_min_uncertainty: 0.78
+    omega_max_uncertainty: 1.0
+    use_edge_residual: True
+    edge_weight: 0.25
+    normalize_components: True
+    strength: 0.01
+    min_scale: 0.99
+    max_scale: 1.0

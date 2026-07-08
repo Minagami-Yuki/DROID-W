@@ -1,0 +1,8 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v10_evidence_floor.yaml
+scene: bonn_crowd2_omega_patch_token_uncertainty_v11_evidence_floor020
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    conditional_gate:
+      evidence_floor:
+        fallback_min_gate: 0.20

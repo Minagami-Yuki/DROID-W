@@ -1,0 +1,7 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v2.yaml
+scene: bonn_person_tracking_omega_patch_token_uncertainty_v3
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    strength: 0.001
+    min_scale: 0.999

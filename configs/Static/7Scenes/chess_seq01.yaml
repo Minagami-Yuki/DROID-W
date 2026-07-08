@@ -4,7 +4,7 @@ dataset: 7scenes
 
 data:
   input_folder: /data1/czy/datasets/7scenes/chess/seq-01
-  output: ./Outputs/7Scenes
+  output: /data1/czy/Output/DROID-omega/7Scenes
 
 tracking:
   buffer: 350

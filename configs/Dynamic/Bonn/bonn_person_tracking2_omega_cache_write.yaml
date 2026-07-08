@@ -1,0 +1,21 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking2_omega_token_suppression.yaml
+scene: bonn_person_tracking2_omega_cache_write
+
+omega_prior:
+  source: model
+  cache_dir: /data1/czy/Output/DROID-omega/cache/Bonn/bonn_person_tracking2
+  cache:
+    write: True
+    output_dir: /data1/czy/Output/DROID-omega/cache/Bonn/bonn_person_tracking2
+    overwrite: False
+    save_depth: True
+    save_confidence: True
+    save_uncertainty: True
+    save_tokens: True
+    save_patch_tokens: True
+  model:
+    patch_tokens:
+      enable: True
+      dim: 8
+      projection: group_mean
+      normalize: True

@@ -19,6 +19,6 @@ omega_prior:
     freeze_droid_uncertainty_update: False
   model:
     repo_path: thirdparty/vggt-omega
-    checkpoint: /data1/czy/Output/DROID-W/vggt_omega_1b_512.pt
+    checkpoint: /data1/czy/Output/DROID-omega/vggt_omega_1b_512.pt
     image_resolution: 512
     preprocess_mode: balanced

@@ -14,7 +14,7 @@ class OmegaOnlinePredictor:
         self.model_cfg = self.cfg.get("model", {}) or {}
         self.device = self.model_cfg.get("device") or device
         self.repo_path = self.model_cfg.get("repo_path", "thirdparty/vggt-omega")
-        self.checkpoint = self.model_cfg.get("checkpoint", "/data1/czy/Output/DROID-W/vggt_omega_1b_512.pt")
+        self.checkpoint = self.model_cfg.get("checkpoint", "/data1/czy/Output/DROID-omega/vggt_omega_1b_512.pt")
         self.image_resolution = int(self.model_cfg.get("image_resolution", 512))
         self.preprocess_mode = self.model_cfg.get("preprocess_mode", "balanced")
         self.patch_size = int(self.model_cfg.get("patch_size", 16))
@@ -23,7 +23,7 @@ class OmegaOnlinePredictor:
     def enabled(self) -> bool:
         return bool(self.cfg.get("enable", False)) and self.cfg.get("source", "cache") in ["model", "online"]
 
-    def predict_frame(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def predict_frame(self, image: torch.Tensor, return_tokens: bool = False, return_patch_tokens: bool = False):
         """Predict metric depth and confidence for one DROID-W frame.
 
         Args:
@@ -32,6 +32,8 @@ class OmegaOnlinePredictor:
         Returns:
             depth: [H, W] float tensor on self.device.
             confidence: [H, W] float tensor on self.device.
+            tokens: optional [T, C] camera/register token tensor when return_tokens is True.
+            patch_map: optional [D, H_patch, W_patch] tensor when return_patch_tokens is True.
         """
 
         if not torch.cuda.is_available() or not str(self.device).startswith("cuda"):
@@ -56,7 +58,61 @@ class OmegaOnlinePredictor:
 
         depth = F.interpolate(depth[None, None], size=(src_h, src_w), mode="bilinear", align_corners=False)[0, 0]
         confidence = F.interpolate(confidence[None, None], size=(src_h, src_w), mode="bilinear", align_corners=False)[0, 0]
+        tokens = None
+        if return_tokens:
+            tokens = predictions.get("camera_and_register_tokens")
+            if tokens is not None:
+                tokens = tokens[0, 0].float().detach()
+        patch_map = None
+        if return_patch_tokens:
+            patch_map = self._project_patch_tokens(predictions)
+
+        if return_tokens and return_patch_tokens:
+            return depth, confidence, tokens, patch_map
+        if return_tokens:
+            return depth, confidence, tokens
+        if return_patch_tokens:
+            return depth, confidence, patch_map
         return depth, confidence
+
+    def _project_patch_tokens(self, predictions: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        patch_cfg = self.model_cfg.get("patch_tokens", {}) or {}
+        patch_tokens = predictions.get("patch_tokens")
+        patch_grid_size = predictions.get("patch_grid_size")
+        if patch_tokens is None or patch_grid_size is None:
+            return None
+
+        tokens = patch_tokens[0, 0].float().detach()
+        if tokens.ndim != 2:
+            return None
+
+        grid_h = int(patch_grid_size[0].item())
+        grid_w = int(patch_grid_size[1].item())
+        if grid_h * grid_w != tokens.shape[0]:
+            return None
+
+        dim = int(patch_cfg.get("dim", 8))
+        if dim <= 0:
+            return None
+
+        projection = patch_cfg.get("projection", "group_mean")
+        if projection == "first":
+            if tokens.shape[1] < dim:
+                projected = F.pad(tokens, (0, dim - tokens.shape[1]))
+            else:
+                projected = tokens[:, :dim]
+        elif projection == "group_mean":
+            pad = (-tokens.shape[1]) % dim
+            if pad:
+                tokens = F.pad(tokens, (0, pad))
+            projected = tokens.reshape(tokens.shape[0], dim, -1).mean(dim=-1)
+        else:
+            raise ValueError("omega_prior.model.patch_tokens.projection must be 'group_mean' or 'first'")
+
+        if bool(patch_cfg.get("normalize", True)):
+            projected = F.normalize(projected, p=2, dim=-1, eps=1e-6)
+
+        return projected.reshape(grid_h, grid_w, dim).permute(2, 0, 1).contiguous()
 
     def _ensure_model(self):
         if self.model is not None:

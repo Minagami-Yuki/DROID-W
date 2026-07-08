@@ -1,0 +1,7 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_token_suppression.yaml
+scene: bonn_crowd2_omega_token_suppression_cache
+
+omega_prior:
+  source: cache
+  cache_dir: /data1/czy/Output/DROID-omega/cache/Bonn/bonn_crowd2
+  missing_policy: error
