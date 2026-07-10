@@ -331,6 +331,11 @@ edge_dtf_prior:
       max_signal: 0.70
       min_multiplier: 0.55
       max_multiplier: 1.10
+    edge_residual_filter:
+      enable: False
+      signal: mean # mean | max
+      min_residual: 0.0
+      min_risk_mean: 0.0
     debug_stats:
       enable: False
       every_n_calls: 1

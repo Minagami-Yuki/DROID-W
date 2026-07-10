@@ -165,3 +165,59 @@ Output files:
 Takeaway:
 
 - On static `chess/seq-01`, patch-token v11 does not hurt tracking accuracy and slightly improves full RMSE compared with both DROID-W and the earlier Omega + Edge-DTF setting. Runtime is essentially unchanged versus Omega + Edge-DTF, but remains slower than the original DROID-W baseline because Omega inference is online.
+
+## Omega Patch-Token V17 Frozen Cache Spot Check
+
+Date: 2026-07-10
+
+Configs:
+
+```text
+configs/Static/7Scenes/chess_seq01_omega_cache_write.yaml
+configs/Static/7Scenes/chess_seq01_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+Commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Static/7Scenes/chess_seq01_omega_cache_write.yaml
+conda run -n droid-w python run.py --config configs/Static/7Scenes/chess_seq01_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+V17 freezes the Bonn-selected cache-based setting:
+
+- cached Omega patch tokens only; no Omega depth replacement and no Omega uncertainty replacement
+- residual-gated patch-token dynamic factor suppression
+- soft Edge-DTF edge covariance with `edge_weight_strength=0.10`
+
+ATE RMSE in meters. FPS is from the final v17-cache run, not from cache generation.
+
+| Sequence | Method | Frames | KF RMSE | Full RMSE | KF Mean | Full Mean | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| chess/seq-01 | DROID-W baseline | 1000 | 0.037822 | 0.037051 | 0.033394 | 0.033077 | 15.81 | 8.16 |
+| chess/seq-01 | Omega patch-token v17 cache | 1000 | 0.037811 | 0.037041 | 0.033384 | 0.033068 | 15.76 | 8.09 |
+
+Delta versus DROID-W baseline:
+
+| Metric | Delta |
+| --- | ---: |
+| KF RMSE | -0.000011 m / -0.03% |
+| Full RMSE | -0.000010 m / -0.03% |
+| Tracking FPS | -0.05 FPS / -0.32% |
+| Full FPS | -0.07 FPS / -0.86% |
+
+Cache generation runtime:
+
+| Stage | Frames | Tracking FPS | Full FPS |
+| --- | ---: | ---: | ---: |
+| Omega cache write | 1000 | 11.08 | 6.75 |
+
+Output files:
+
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/traj/metrics_kf_traj.txt`
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/traj/metrics_full_traj.txt`
+- `/data1/czy/Output/DROID-omega/7Scenes/chess_seq01_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/timer_summary.csv`
+
+Takeaway:
+
+- On static `chess/seq-01`, frozen v17 is effectively accuracy-neutral relative to DROID-W and keeps the final tracking FPS close to baseline once Omega priors are cached.

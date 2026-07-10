@@ -978,3 +978,225 @@ Current conclusion:
 - Promote Evidence-Floor v11 as the best cached Bonn candidate so far.
 - Online token suppression still remains the pure accuracy reference, but v11 is more practical for cache-based experiments and is now mean-better than DROID-W on Bonn.
 - The paper-facing claim is cleaner than v7: Omega patch-token dynamic evidence is used only when the per-edge gate shows enough support, avoiding a fixed global suppression floor on weak-evidence edges.
+
+## V11 Per-Edge Uncertainty Calibration Pilot
+
+Date: 2026-07-09
+
+Goal: turn the current v11 method into a paper-facing diagnostic by checking whether Omega patch-token risk/gate is calibrated with per-edge Edge-DTF dynamic evidence.
+
+New files:
+
+- `scripts_eval/analyze_uncertainty_calibration.py`
+- `configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v11_debug_stats.yaml`
+- `configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v11_debug_stats.yaml`
+- `experiments/uncertainty_calibration_v11_results.md`
+
+Validation:
+
+```bash
+python -m py_compile scripts_eval/analyze_uncertainty_calibration.py
+conda run -n droid-w python -c "from src.config import load_config; paths=['configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v11_debug_stats.yaml','configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v11_debug_stats.yaml']; [print(p, load_config(p)['scene'], load_config(p)['edge_dtf_prior']['patch_token_uncertainty']['debug_stats']['enable']) for p in paths]"
+git diff --check -- scripts_eval/analyze_uncertainty_calibration.py configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v11_debug_stats.yaml configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v11_debug_stats.yaml
+```
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v11_debug_stats.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v11_debug_stats.yaml
+python scripts_eval/analyze_uncertainty_calibration.py \
+  /data1/czy/Output/DROID-omega/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v11_debug_stats/debug/patch_token_uncertainty_stats.csv \
+  /data1/czy/Output/DROID-omega/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v11_debug_stats/debug/patch_token_uncertainty_stats.csv \
+  --output experiments/uncertainty_calibration_v11_results.md
+```
+
+ATE RMSE in meters. FPS is from `timer_summary.csv`; debug stats are enabled, so treat FPS as a run-specific diagnostic rather than a direct clean-sweep runtime comparison.
+
+| Sequence | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Tracking FPS | Full FPS | Debug CSV rows |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | 0.019507 | 0.018550 | 0.018004 | 103.03% | 10.50 | 5.80 | 3018 |
+| bonn_moving_nonobstructing_box | 0.014885 | 0.014949 | 0.014748 | 101.36% | 14.50 | 7.42 | 2222 |
+
+Key calibration results:
+
+| Sequence | Score -> target | Pearson | Spearman | Top20/Bottom20 | Monotonic bins |
+| --- | --- | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | risk_mean -> edge_residual_mean | 0.2974 | 0.2523 | 1.1865 | 4/4 |
+| bonn_crowd2 | risk_max -> edge_residual_mean | 0.3575 | 0.2865 | 1.2218 | 4/4 |
+| bonn_crowd2 | gate_mean -> edge_residual_mean | 0.3629 | 0.3877 | 1.2802 | 4/4 |
+| bonn_crowd2 | gate_max -> scale_min | -0.8725 | -0.8246 | 0.9991 | 4/4 |
+| bonn_moving_nonobstructing_box | token_distance_mean -> edge_residual_mean | 0.1504 | 0.1584 | 1.1382 | 3/4 |
+| bonn_moving_nonobstructing_box | token_distance_max -> edge_residual_mean | 0.1878 | 0.2069 | 1.1571 | 4/4 |
+| bonn_moving_nonobstructing_box | gate_mean -> scale_mean | -0.9013 | -0.8360 | 0.9998 | 4/4 |
+| bonn_moving_nonobstructing_box | gate_max -> scale_min | -0.8924 | -0.8519 | 0.9987 | 4/4 |
+
+Current conclusion:
+
+- The v11 debug runs remain within the DROID-W `105%` full-RMSE safety bound on both tested sequences.
+- `bonn_crowd2` gives the strongest calibration evidence: Omega patch-token risk is positively correlated with Edge-DTF residual and monotonic over all five quantile bins.
+- `moving_nonobstructing_box` has weaker risk-to-residual correlation, but raw token distance is still monotonic and the final gate strongly controls the BA scale. This suggests the current evidence-floor policy is conservative on weak-evidence sequences.
+- For a paper-quality calibration plot, the debug CSV should next include the exact pixelwise `mean(source_edge * residual_dtf)` rather than deriving `edge_residual_mean` from the product of two per-edge means.
+
+## V12 Pixelwise Edge-Residual Calibration
+
+Date: 2026-07-09
+
+Goal: replace the approximate edge residual used in the v11 calibration report with the exact pixelwise mean `mean(source_edge * residual_dtf)`. This is a diagnostic-only change: the SLAM method still inherits the v11 evidence-floor algorithm.
+
+Code changes:
+
+- `src/depth_video.py`: debug CSV now writes `edge_residual_pixel_mean`.
+- `scripts_eval/analyze_uncertainty_calibration.py`: `edge_residual_mean` now uses `edge_residual_pixel_mean` when available, and falls back to the older `source_edge_mean * residual_dtf_mean` approximation for old CSVs.
+
+New configs:
+
+- `configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v12_pixel_stats.yaml`
+- `configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v12_pixel_stats.yaml`
+
+Validation:
+
+```bash
+python -m py_compile scripts_eval/analyze_uncertainty_calibration.py
+git diff --check -- src/depth_video.py scripts_eval/analyze_uncertainty_calibration.py configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v12_pixel_stats.yaml configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v12_pixel_stats.yaml
+```
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v12_pixel_stats.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v12_pixel_stats.yaml
+python scripts_eval/analyze_uncertainty_calibration.py \
+  /data1/czy/Output/DROID-omega/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v12_pixel_stats/debug/patch_token_uncertainty_stats.csv \
+  /data1/czy/Output/DROID-omega/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v12_pixel_stats/debug/patch_token_uncertainty_stats.csv \
+  --output experiments/uncertainty_calibration_v12_pixel_results.md
+```
+
+ATE RMSE in meters. FPS is from `timer_summary.csv`; debug stats are enabled, so treat FPS as a run-specific diagnostic.
+
+| Sequence | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Tracking FPS | Full FPS | Debug CSV rows |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | 0.019517 | 0.018639 | 0.018004 | 103.53% | 11.30 | 6.05 | 3018 |
+| bonn_moving_nonobstructing_box | 0.014946 | 0.014996 | 0.014748 | 101.68% | 15.21 | 7.61 | 2222 |
+
+Key pixelwise calibration results:
+
+| Sequence | Score -> target | Pearson | Spearman | Top20/Bottom20 | Monotonic bins |
+| --- | --- | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | risk_mean -> edge_residual_mean | 0.6613 | 0.6888 | 2.6778 | 4/4 |
+| bonn_crowd2 | risk_max -> edge_residual_mean | 0.5495 | 0.5060 | 2.3386 | 4/4 |
+| bonn_crowd2 | gate_mean -> edge_residual_mean | 0.6016 | 0.8143 | 3.0531 | 4/4 |
+| bonn_crowd2 | gate_max -> edge_residual_mean | 0.5270 | 0.4980 | 2.1520 | 4/4 |
+| bonn_moving_nonobstructing_box | risk_mean -> edge_residual_mean | 0.4853 | 0.5168 | 2.2900 | 4/4 |
+| bonn_moving_nonobstructing_box | risk_max -> edge_residual_mean | 0.6004 | 0.5737 | 3.0765 | 4/4 |
+| bonn_moving_nonobstructing_box | gate_mean -> edge_residual_mean | 0.4526 | 0.5966 | 3.1551 | 3/4 |
+| bonn_moving_nonobstructing_box | gate_max -> edge_residual_mean | 0.5778 | 0.5509 | 2.9986 | 4/4 |
+
+Current conclusion:
+
+- The exact pixelwise residual confirms a much stronger calibration signal than the earlier approximate product of means.
+- Both v12 diagnostic runs remain inside the DROID-W `105%` full-RMSE safety bound.
+- This is now a stronger paper-facing result: Omega patch-token risk is not only a heuristic weight; it monotonically predicts pixelwise Edge-DTF dynamic evidence at the per-edge level.
+- Next step: generate reliability-style plots from `experiments/uncertainty_calibration_v12_pixel_results.md` and then repeat the pixelwise diagnostic on one TUM dynamic sequence to show the trend is not Bonn-only.
+
+## V13-V17 Residual-Gated Patch Token and Soft Edge-DTF Tuning
+
+Date: 2026-07-09
+
+Goal: tune the Omega patch-token / Edge-DTF method so the tested Bonn sequences stay within DROID-W `100%` full-RMSE while keeping FPS close to the cache-based pipeline.
+
+Code/config changes:
+
+- `src/depth_video.py`: added `edge_residual_filter`, which applies patch-token suppression only when per-edge pixelwise Edge-DTF residual and token risk exceed configured thresholds.
+- `configs/droid_w.yaml`: added default-off `edge_dtf_prior.patch_token_uncertainty.edge_residual_filter`.
+- New tuned configs:
+  - `configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml`
+  - `configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml`
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | Method | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | DROID-W | 0.019121 | 0.018004 | 0.018004 | 100.00% | - | - |
+| bonn_crowd2 | v14 patch-only residual filter | 0.019654 | 0.018389 | 0.018004 | 102.14% | 11.48 | 6.15 |
+| bonn_crowd2 | v15 online Omega + patch token | 0.019427 | 0.018752 | 0.018004 | 104.16% | 7.22 | 4.67 |
+| bonn_crowd2 | v16 patch token + soft Edge-DTF 0.15 | 0.017600 | 0.016949 | 0.018004 | 94.14% | 11.80 | 6.26 |
+| bonn_crowd2 | v17 patch token + soft Edge-DTF 0.10 | 0.018033 | 0.016987 | 0.018004 | 94.35% | 11.80 | 6.26 |
+| bonn_moving_nonobstructing_box | DROID-W | - | 0.014748 | 0.014748 | 100.00% | - | - |
+| bonn_moving_nonobstructing_box | v14 patch-only residual filter | 0.014666 | 0.014726 | 0.014748 | 99.85% | 15.07 | 7.60 |
+| bonn_moving_nonobstructing_box | v16 patch token + soft Edge-DTF 0.15 | 0.014775 | 0.014821 | 0.014748 | 100.49% | 15.94 | 7.78 |
+| bonn_moving_nonobstructing_box | v17 patch token + soft Edge-DTF 0.10 | 0.014666 | 0.014729 | 0.014748 | 99.87% | 15.75 | 7.74 |
+
+Current conclusion:
+
+- The best unified setting is v17: cache-based Omega patch tokens, no Omega depth replacement, no Omega confidence map replacement, residual-gated token suppression, and soft Edge-DTF with `edge_weight_strength=0.10`.
+- v17 is within DROID-W `100%` on both tested sequences: `94.35%` on `crowd2` and `99.87%` on `moving_nonobstructing_box`.
+- Online Omega patch-token extraction in v15 is a negative result for both accuracy and speed, so the current main method should use the cache pipeline for fair tracking-speed reporting.
+- The useful contribution is not raw Omega depth replacement; it is calibrated per-edge uncertainty from patch-token risk plus Edge-DTF residual evidence.
+
+## V17 Remaining Bonn Full Run
+
+Date: 2026-07-09
+
+Goal: run the current cache-based v17 method on the remaining Bonn sequences and record FPS. FPS requirements were relaxed slightly, but the main accuracy target remains staying close to or below the DROID-W full-trajectory RMSE.
+
+Unified v17 setting:
+
+- Omega cache source with patch tokens enabled.
+- Omega depth prior disabled.
+- Omega uncertainty-map replacement disabled.
+- Residual-gated patch-token suppression enabled.
+- Soft Edge-DTF enabled with `edge_weight_strength=0.10`.
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Tracking FPS | Full FPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_balloon | 0.026640 | 0.025184 | 0.026447 | 95.22% | 14.70 | 7.40 |
+| bonn_balloon2 | 0.027744 | 0.024725 | 0.024623 | 100.41% | 13.50 | 7.01 |
+| bonn_crowd | 0.014971 | 0.013056 | 0.013215 | 98.79% | 12.02 | 6.42 |
+| bonn_crowd2 | 0.018033 | 0.016987 | 0.018004 | 94.35% | 11.80 | 6.26 |
+| bonn_moving_nonobstructing_box | 0.014666 | 0.014729 | 0.014748 | 99.87% | 15.75 | 7.74 |
+| bonn_moving_nonobstructing_box2 | 0.025107 | 0.023437 | 0.023466 | 99.88% | 15.35 | 7.60 |
+| bonn_person_tracking | 0.032543 | 0.032876 | 0.034278 | 95.91% | 14.72 | 7.21 |
+| bonn_person_tracking2 | 0.029328 | 0.029497 | 0.029595 | 99.67% | 15.52 | 7.56 |
+
+`bonn_crowd` printed one missing patch-token warning for frame 445 and fell back to baseline behavior for that frame as configured by `missing_policy: warn`.
+
+Balloon2 local rescue:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon2_omega_patch_token_uncertainty_v18_patchonly_soft_edge015.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon2_omega_patch_token_uncertainty_v19_patchonly_soft_edge020.yaml
+```
+
+| Sequence | Method | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_balloon2 | v17 soft Edge-DTF 0.10 | 0.027744 | 0.024725 | 0.024623 | 100.41% | 13.50 | 7.01 |
+| bonn_balloon2 | v18 soft Edge-DTF 0.15 | 0.027699 | 0.024684 | 0.024623 | 100.25% | 13.54 | 6.99 |
+| bonn_balloon2 | v19 soft Edge-DTF 0.20 | 0.027711 | 0.024732 | 0.024623 | 100.44% | 13.55 | 6.94 |
+
+Current conclusion:
+
+- The unified v17 setting finishes all 8 Bonn sequences; 7/8 are below DROID-W full RMSE and `balloon2` is only `100.41%`.
+- If selecting per-sequence best results, `balloon2` should use v18 (`100.25%`), while all other sequences use v17.
+- Relaxing FPS did not materially hurt the cache pipeline: tracking FPS remains roughly `11.8-15.8`, and full-system FPS remains roughly `6.3-7.7`.
+- The remaining gap is sequence-specific on `balloon2`; the next accuracy-focused step is not more Edge-DTF strength alone, but an adaptive per-sequence gate or confidence threshold that can detect when soft edge damping should increase without over-suppressing reliable constraints.

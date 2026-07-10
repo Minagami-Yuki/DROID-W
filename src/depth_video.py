@@ -891,6 +891,34 @@ class DepthVideo:
             min=float(patch_cfg.get("min_scale", 0.97)),
             max=float(patch_cfg.get("max_scale", 1.0)),
         )
+        filter_cfg = patch_cfg.get("edge_residual_filter", {}) or {}
+        filter_signal = None
+        filter_active = None
+        if bool(filter_cfg.get("enable", False)):
+            valid = valid_pixel.detach().bool()
+            flat_valid = valid.reshape(valid.shape[0], -1)
+            denom = flat_valid.sum(dim=1).clamp(min=1).float()
+            edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            flat_residual = edge_residual.reshape(edge_residual.shape[0], -1)
+            if filter_cfg.get("signal", "mean") == "max":
+                residual_signal = torch.where(flat_valid, flat_residual, torch.zeros_like(flat_residual)).max(dim=1).values
+            elif filter_cfg.get("signal", "mean") == "mean":
+                residual_signal = (flat_residual * flat_valid.float()).sum(dim=1) / denom
+            else:
+                raise ValueError(
+                    f"edge_dtf_prior.patch_token_uncertainty.edge_residual_filter.signal "
+                    f"must be 'mean' or 'max', got {filter_cfg.get('signal')}"
+                )
+            filter_signal = residual_signal
+
+            flat_risk = torch.clamp(risk, 0.0, 1.0).reshape(risk.shape[0], -1)
+            risk_mean = (flat_risk * flat_valid.float()).sum(dim=1) / denom
+            active = (
+                (residual_signal >= float(filter_cfg.get("min_residual", 0.0)))
+                & (risk_mean >= float(filter_cfg.get("min_risk_mean", 0.0)))
+            ).view(-1, 1, 1)
+            filter_active = active
+            scale = torch.where(active, scale, torch.ones_like(scale))
         self._write_patch_token_uncertainty_stats(
             patch_cfg,
             ii,
@@ -903,6 +931,8 @@ class DepthVideo:
             residual_dtf,
             scale,
             strength,
+            filter_signal,
+            filter_active,
         )
         return scale
 
@@ -919,6 +949,8 @@ class DepthVideo:
         residual_dtf,
         scale,
         strength,
+        filter_signal=None,
+        filter_active=None,
     ):
         stats_cfg = patch_cfg.get("debug_stats", {}) or {}
         if not bool(stats_cfg.get("enable", False)):
@@ -943,10 +975,17 @@ class DepthVideo:
             "risk": torch.clamp(risk[:count].detach().float(), 0.0, 1.0),
             "source_edge": source_edge[:count].detach().float(),
             "residual_dtf": residual_dtf[:count].detach().float(),
+            "edge_residual": torch.clamp(
+                source_edge[:count].detach().float() * residual_dtf[:count].detach().float(),
+                0.0,
+                1.0,
+            ),
             "scale": scale[:count].detach().float(),
         }
         if gate is not None:
             values["gate"] = gate[:count].detach().float()
+        if filter_active is not None:
+            values["filter_active"] = filter_active[:count].detach().float().expand_as(values["scale"])
 
         mask = valid_pixel[:count].detach().bool()
         flat_mask = mask.reshape(count, -1)
@@ -982,10 +1021,17 @@ class DepthVideo:
                 "risk_max": float(masked_max("risk")[k].cpu()),
                 "source_edge_mean": float(masked_mean("source_edge")[k].cpu()),
                 "residual_dtf_mean": float(masked_mean("residual_dtf")[k].cpu()),
+                "edge_residual_pixel_mean": float(masked_mean("edge_residual")[k].cpu()),
                 "scale_mean": float(masked_mean("scale")[k].cpu()),
                 "scale_min": float(torch.where(flat_mask[k], values["scale"][k].reshape(-1), torch.ones_like(values["scale"][k].reshape(-1))).min().cpu()),
                 "strength": strength_value,
             }
+            if filter_signal is not None and filter_active is not None:
+                row["filter_signal"] = float(filter_signal[min(k, filter_signal.numel() - 1)].detach().cpu())
+                row["filter_active"] = float(filter_active[min(k, filter_active.shape[0] - 1)].detach().float().cpu().mean())
+            else:
+                row["filter_signal"] = ""
+                row["filter_active"] = ""
             if "gate" in values:
                 row["gate_mean"] = float(masked_mean("gate")[k].cpu())
                 row["gate_max"] = float(masked_max("gate")[k].cpu())
@@ -1008,9 +1054,12 @@ class DepthVideo:
             "gate_max",
             "source_edge_mean",
             "residual_dtf_mean",
+            "edge_residual_pixel_mean",
             "scale_mean",
             "scale_min",
             "strength",
+            "filter_signal",
+            "filter_active",
         ]
         file_exists = os.path.exists(out_path)
         with open(out_path, "a", newline="") as f:

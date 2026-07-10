@@ -1,0 +1,67 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking2.yaml
+scene: bonn_person_tracking2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010
+
+omega_prior:
+  enable: True
+  source: cache
+  cache_dir: /data1/czy/Output/DROID-omega/cache/Bonn/bonn_person_tracking2
+  missing_policy: warn
+  depth:
+    enable: False
+  uncertainty:
+    enable: False
+  model:
+    patch_tokens:
+      enable: True
+      dim: 8
+      projection: group_mean
+      normalize: True
+
+edge_dtf_prior:
+  enable: True
+  edge_quantile: 0.80
+  min_edge_threshold: 0.05
+  max_distance_px: 6.0
+  edge_weight_strength: 0.10
+  residual_power: 1.0
+  min_edge_weight: 0.7
+  max_edge_weight: 1.0
+  cycle_consistency:
+    enable: True
+    mode: pair
+    max_asymmetry: 0.08
+    failed_scale: 0.5
+    min_mean_residual: 0.0
+    max_mean_residual: 1.0
+    min_edge_mass: 16.0
+  patch_token_uncertainty:
+    enable: True
+    token_dim: 8
+    min_distance: 0.05
+    max_distance: 0.60
+    strength: 0.004
+    min_scale: 0.996
+    max_scale: 1.0
+    combine_with_omega_uncertainty: False
+    combine_with_edge_residual: False
+    normalize_components: True
+    conditional_gate:
+      enable: True
+      mode: multiply
+      min_gate: 0.35
+      use_omega_uncertainty: False
+      use_edge_residual: True
+      edge_weight: 1.0
+      edge_min_residual: 0.03
+      edge_max_residual: 0.30
+      normalize_components: True
+      evidence_floor:
+        enable: True
+        signal: gate_max
+        threshold: 0.90
+        fallback_min_gate: 0.20
+    edge_residual_filter:
+      enable: True
+      signal: mean
+      min_residual: 0.030
+      min_risk_mean: 0.140

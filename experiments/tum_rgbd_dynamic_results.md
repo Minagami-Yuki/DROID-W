@@ -116,3 +116,56 @@ Output files:
 Takeaway:
 
 - On `freiburg3_walking_xyz`, patch-token v11 is accuracy-neutral relative to the earlier Omega + Edge-DTF setting, but slower. This suggests the dense patch-token uncertainty should be reported as a dynamic-scene robustness/calibration component, not as a speed improvement, unless used from cache or at reduced update rate.
+
+## Omega Patch-Token V17 Frozen Cache Spot Check
+
+Date: 2026-07-10
+
+Configs:
+
+```text
+configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz_omega_cache_write.yaml
+configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+Commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz_omega_cache_write.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+```
+
+V17 uses cached Omega patch tokens only, disables Omega depth/uncertainty replacement, and applies residual-gated patch-token dynamic factor suppression with soft Edge-DTF `edge_weight_strength=0.10`.
+
+ATE RMSE in meters. FPS is from the final v17-cache run, not from cache generation.
+
+| Sequence | Method | Frames | KF RMSE | Full RMSE | KF Mean | Full Mean | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| freiburg3_walking_xyz | Omega + Edge-DTF soft cycle | 858 | 0.012222 | 0.012143 | 0.010572 | 0.010480 | 10.22 | 6.35 |
+| freiburg3_walking_xyz | Omega patch-token v11 evidence floor | 858 | 0.012217 | 0.012142 | 0.010567 | 0.010478 | 8.11 | 5.47 |
+| freiburg3_walking_xyz | Omega patch-token v17 cache | 858 | 0.012266 | 0.012169 | 0.010616 | 0.010503 | 14.46 | 7.71 |
+
+Delta versus previous Omega + Edge-DTF soft cycle:
+
+| Metric | Delta |
+| --- | ---: |
+| KF RMSE | +0.000044 m / +0.36% |
+| Full RMSE | +0.000026 m / +0.21% |
+| Tracking FPS | +4.24 FPS / +41.49% |
+| Full FPS | +1.36 FPS / +21.42% |
+
+Cache generation runtime:
+
+| Stage | Frames | Tracking FPS | Full FPS |
+| --- | ---: | ---: | ---: |
+| Omega cache write | 858 | 10.27 | 6.46 |
+
+Output files:
+
+- `/data1/czy/Output/DROID-omega/TUM_RGBD/freiburg3_walking_xyz_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/traj/metrics_kf_traj.txt`
+- `/data1/czy/Output/DROID-omega/TUM_RGBD/freiburg3_walking_xyz_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/traj/metrics_full_traj.txt`
+- `/data1/czy/Output/DROID-omega/TUM_RGBD/freiburg3_walking_xyz_omega_patch_token_uncertainty_v17_patchonly_soft_edge010/timer_summary.csv`
+
+Takeaway:
+
+- On `freiburg3_walking_xyz`, frozen v17 is within `0.3%` full RMSE of the prior online Omega setting and is faster in the final run because Omega inference is moved to cache generation.

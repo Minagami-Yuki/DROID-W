@@ -1,0 +1,44 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_edge_dtf015_cycle008_soft050.yaml
+scene: bonn_crowd2_omega_edge_dtf015_cycle008_soft050_patch_token_v15
+
+omega_prior:
+  missing_policy: warn
+  model:
+    patch_tokens:
+      enable: True
+      dim: 8
+      projection: group_mean
+      normalize: True
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    enable: True
+    token_dim: 8
+    min_distance: 0.05
+    max_distance: 0.60
+    strength: 0.004
+    min_scale: 0.996
+    max_scale: 1.0
+    combine_with_omega_uncertainty: False
+    combine_with_edge_residual: False
+    normalize_components: True
+    conditional_gate:
+      enable: True
+      mode: multiply
+      min_gate: 0.35
+      use_omega_uncertainty: False
+      use_edge_residual: True
+      edge_weight: 1.0
+      edge_min_residual: 0.03
+      edge_max_residual: 0.30
+      normalize_components: True
+      evidence_floor:
+        enable: True
+        signal: gate_max
+        threshold: 0.90
+        fallback_min_gate: 0.20
+    edge_residual_filter:
+      enable: True
+      signal: mean
+      min_residual: 0.030
+      min_risk_mean: 0.140

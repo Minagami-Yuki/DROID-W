@@ -1,0 +1,35 @@
+inherit_from: ./configs/Dynamic/TUM_RGBD/freiburg3_walking_xyz.yaml
+scene: freiburg3_walking_xyz_omega_cache_write
+
+data:
+  input_folder: /data1/czy/datasets/TUM_RGBD/dynamic/rgbd_dataset_freiburg3_walking_xyz
+  output: /data1/czy/Output/DROID-omega/TUM_RGBD
+
+omega_prior:
+  enable: True
+  source: model
+  cache_dir: /data1/czy/Output/DROID-omega/cache/TUM_RGBD/freiburg3_walking_xyz
+  cache:
+    write: True
+    output_dir: /data1/czy/Output/DROID-omega/cache/TUM_RGBD/freiburg3_walking_xyz
+    overwrite: False
+    save_depth: True
+    save_confidence: True
+    save_uncertainty: True
+    save_tokens: True
+    save_patch_tokens: True
+  depth:
+    enable: False
+  uncertainty:
+    enable: False
+  model:
+    repo_path: thirdparty/vggt-omega
+    checkpoint: /data1/czy/Output/DROID-omega/vggt_omega_1b_512.pt
+    image_resolution: 512
+    preprocess_mode: balanced
+    patch_size: 16
+    patch_tokens:
+      enable: True
+      dim: 8
+      projection: group_mean
+      normalize: True
