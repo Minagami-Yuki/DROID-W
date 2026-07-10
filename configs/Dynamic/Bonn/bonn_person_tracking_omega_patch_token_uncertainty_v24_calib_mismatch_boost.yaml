@@ -1,0 +1,13 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+scene: bonn_person_tracking_omega_patch_token_uncertainty_v24_calib_mismatch_boost
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    calibration_mismatch_boost:
+      enable: True
+      weight: 0.06
+      min_residual: 0.04
+      max_residual: 0.28
+      min_risk: 0.00
+      max_risk: 0.25
+      apply_after_gate: False

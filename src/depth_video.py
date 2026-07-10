@@ -780,6 +780,35 @@ class DepthVideo:
         if bool(patch_cfg.get("normalize_components", True)):
             risk = risk / max(total, 1e-6)
 
+        mismatch_cfg = patch_cfg.get("calibration_mismatch_boost", {}) or {}
+        if bool(mismatch_cfg.get("enable", False)) and not bool(mismatch_cfg.get("apply_after_gate", False)):
+            edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            min_residual = float(mismatch_cfg.get("min_residual", 0.05))
+            max_residual = float(mismatch_cfg.get("max_residual", 0.40))
+            residual_score = torch.clamp(
+                (edge_residual - min_residual) / max(max_residual - min_residual, 1e-6),
+                0.0,
+                1.0,
+            )
+            min_risk = float(mismatch_cfg.get("min_risk", 0.0))
+            max_risk = float(mismatch_cfg.get("max_risk", 0.35))
+            confidence_gap = 1.0 - torch.clamp(
+                (risk - min_risk) / max(max_risk - min_risk, 1e-6),
+                0.0,
+                1.0,
+            )
+            mismatch = residual_score * confidence_gap
+            min_pair_risk_mean = float(mismatch_cfg.get("min_pair_risk_mean", 0.0))
+            if min_pair_risk_mean > 0.0:
+                valid = valid_pixel.detach().bool()
+                flat_valid = valid.reshape(valid.shape[0], -1)
+                denom = flat_valid.sum(dim=1).clamp(min=1).float()
+                flat_risk = torch.clamp(risk.detach(), 0.0, 1.0).reshape(risk.shape[0], -1)
+                pair_risk_mean = (flat_risk * flat_valid.float()).sum(dim=1) / denom
+                active_pair = (pair_risk_mean >= min_pair_risk_mean).view(-1, 1, 1)
+                mismatch = torch.where(active_pair, mismatch, torch.zeros_like(mismatch))
+            risk = torch.clamp(risk + float(mismatch_cfg.get("weight", 0.10)) * mismatch, 0.0, 1.0)
+
         gate_for_adaptive = None
         gate_cfg = patch_cfg.get("conditional_gate", {}) or {}
         if bool(gate_cfg.get("enable", False)):
@@ -820,9 +849,90 @@ class DepthVideo:
             if bool(gate_cfg.get("normalize_components", True)):
                 gate = gate / max(gate_total, 1e-6)
 
-            min_gate = float(gate_cfg.get("min_gate", 0.0))
+            min_gate_value = float(gate_cfg.get("min_gate", 0.0))
+            min_gate = torch.full_like(gate[:, :1, :1], min_gate_value)
+            fallback_min_gate_override = None
+
+            adaptive_gate_cfg = gate_cfg.get("adaptive", {}) or {}
+            if bool(adaptive_gate_cfg.get("enable", False)):
+                signal_name = adaptive_gate_cfg.get("signal", "risk_mean")
+                valid = valid_pixel.detach().bool()
+                flat_valid = valid.reshape(valid.shape[0], -1)
+                denom = flat_valid.sum(dim=1).clamp(min=1).float()
+
+                def masked_pair_mean(tensor):
+                    flat = tensor.reshape(tensor.shape[0], -1)
+                    return (flat * flat_valid.float()).sum(dim=1) / denom
+
+                def masked_pair_max(tensor):
+                    flat = tensor.reshape(tensor.shape[0], -1)
+                    return torch.where(flat_valid, flat, torch.zeros_like(flat)).max(dim=1).values
+
+                risk_for_signal = torch.clamp(risk.detach(), 0.0, 1.0)
+                edge_residual_for_signal = torch.clamp(source_edge.detach() * residual_dtf.detach(), 0.0, 1.0)
+                gate_for_signal = torch.clamp(gate.detach(), 0.0, 1.0)
+                risk_residual_for_signal = risk_for_signal * edge_residual_for_signal
+                calibration_mismatch_for_signal = edge_residual_for_signal * (1.0 - risk_for_signal)
+                if signal_name == "risk_mean":
+                    adaptive_signal = masked_pair_mean(risk_for_signal)
+                elif signal_name == "risk_max":
+                    adaptive_signal = masked_pair_max(risk_for_signal)
+                elif signal_name == "edge_residual_mean":
+                    adaptive_signal = masked_pair_mean(edge_residual_for_signal)
+                elif signal_name == "edge_residual_max":
+                    adaptive_signal = masked_pair_max(edge_residual_for_signal)
+                elif signal_name == "gate_mean":
+                    adaptive_signal = masked_pair_mean(gate_for_signal)
+                elif signal_name == "gate_max":
+                    adaptive_signal = masked_pair_max(gate_for_signal)
+                elif signal_name == "risk_residual_mean":
+                    adaptive_signal = masked_pair_mean(risk_residual_for_signal)
+                elif signal_name == "risk_residual_max":
+                    adaptive_signal = masked_pair_max(risk_residual_for_signal)
+                elif signal_name == "calibration_mismatch_mean":
+                    adaptive_signal = masked_pair_mean(calibration_mismatch_for_signal)
+                elif signal_name == "calibration_mismatch_max":
+                    adaptive_signal = masked_pair_max(calibration_mismatch_for_signal)
+                else:
+                    raise ValueError(
+                        f"edge_dtf_prior.patch_token_uncertainty.conditional_gate.adaptive.signal "
+                        f"must be one of risk_mean, risk_max, edge_residual_mean, edge_residual_max, "
+                        f"gate_mean, gate_max, risk_residual_mean, risk_residual_max, "
+                        f"calibration_mismatch_mean, calibration_mismatch_max; got {signal_name}"
+                    )
+
+                min_signal = float(adaptive_gate_cfg.get("min_signal", 0.10))
+                max_signal = float(adaptive_gate_cfg.get("max_signal", 0.20))
+                alpha = torch.clamp(
+                    (adaptive_signal - min_signal) / max(max_signal - min_signal, 1e-6),
+                    0.0,
+                    1.0,
+                ).view(-1, 1, 1)
+
+                min_multiplier = float(adaptive_gate_cfg.get("min_multiplier", 1.0))
+                max_multiplier = float(adaptive_gate_cfg.get("max_multiplier", 1.0))
+                multiplier = min_multiplier + (max_multiplier - min_multiplier) * alpha
+                gate = torch.clamp(gate * multiplier, 0.0, 1.0)
+
+                min_gate_low = adaptive_gate_cfg.get("min_gate_low", None)
+                min_gate_high = adaptive_gate_cfg.get("min_gate_high", None)
+                if min_gate_low is not None or min_gate_high is not None:
+                    low = min_gate_value if min_gate_low is None else float(min_gate_low)
+                    high = min_gate_value if min_gate_high is None else float(min_gate_high)
+                    min_gate = low + (high - low) * alpha
+
+                fallback_low = adaptive_gate_cfg.get("fallback_min_gate_low", None)
+                fallback_high = adaptive_gate_cfg.get("fallback_min_gate_high", None)
+                if fallback_low is not None or fallback_high is not None:
+                    fallback_base = float(
+                        (gate_cfg.get("evidence_floor", {}) or {}).get("fallback_min_gate", 0.0)
+                    )
+                    low = fallback_base if fallback_low is None else float(fallback_low)
+                    high = fallback_base if fallback_high is None else float(fallback_high)
+                    fallback_min_gate_override = low + (high - low) * alpha
+
             evidence_floor_cfg = gate_cfg.get("evidence_floor", {}) or {}
-            if bool(evidence_floor_cfg.get("enable", False)) and min_gate > 0.0:
+            if bool(evidence_floor_cfg.get("enable", False)) and float(min_gate.max().detach().cpu()) > 0.0:
                 signal_name = evidence_floor_cfg.get("signal", "gate_max")
                 if signal_name == "gate_max":
                     floor_signal = gate.amax(dim=(1, 2), keepdim=True)
@@ -833,17 +943,24 @@ class DepthVideo:
                         f"edge_dtf_prior.patch_token_uncertainty.conditional_gate."
                         f"evidence_floor.signal must be 'gate_max' or 'gate_mean', got {signal_name}"
                     )
-                fallback_min_gate = float(evidence_floor_cfg.get("fallback_min_gate", 0.0))
+                if fallback_min_gate_override is None:
+                    fallback_min_gate = torch.full_like(
+                        min_gate,
+                        float(evidence_floor_cfg.get("fallback_min_gate", 0.0)),
+                    )
+                else:
+                    fallback_min_gate = fallback_min_gate_override
                 threshold = float(evidence_floor_cfg.get("threshold", 0.90))
                 floor = torch.where(
                     floor_signal >= threshold,
-                    torch.full_like(floor_signal, min_gate),
-                    torch.full_like(floor_signal, fallback_min_gate),
+                    min_gate,
+                    fallback_min_gate,
                 )
                 gate = torch.maximum(gate, floor)
                 gate = torch.clamp(gate, max=1.0)
             else:
-                gate = torch.clamp(gate, min=min_gate, max=1.0)
+                gate = torch.maximum(gate, min_gate)
+                gate = torch.clamp(gate, max=1.0)
             gate_for_adaptive = gate
             mode = gate_cfg.get("mode", "multiply")
             if mode == "multiply":
@@ -859,6 +976,34 @@ class DepthVideo:
                     f"edge_dtf_prior.patch_token_uncertainty.conditional_gate.mode "
                     f"must be 'multiply' or 'hard', got {mode}"
                 )
+
+        if bool(mismatch_cfg.get("enable", False)) and bool(mismatch_cfg.get("apply_after_gate", False)):
+            edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            min_residual = float(mismatch_cfg.get("min_residual", 0.05))
+            max_residual = float(mismatch_cfg.get("max_residual", 0.40))
+            residual_score = torch.clamp(
+                (edge_residual - min_residual) / max(max_residual - min_residual, 1e-6),
+                0.0,
+                1.0,
+            )
+            min_risk = float(mismatch_cfg.get("min_risk", 0.0))
+            max_risk = float(mismatch_cfg.get("max_risk", 0.35))
+            confidence_gap = 1.0 - torch.clamp(
+                (risk - min_risk) / max(max_risk - min_risk, 1e-6),
+                0.0,
+                1.0,
+            )
+            mismatch = residual_score * confidence_gap
+            min_pair_risk_mean = float(mismatch_cfg.get("min_pair_risk_mean", 0.0))
+            if min_pair_risk_mean > 0.0:
+                valid = valid_pixel.detach().bool()
+                flat_valid = valid.reshape(valid.shape[0], -1)
+                denom = flat_valid.sum(dim=1).clamp(min=1).float()
+                flat_risk = torch.clamp(risk.detach(), 0.0, 1.0).reshape(risk.shape[0], -1)
+                pair_risk_mean = (flat_risk * flat_valid.float()).sum(dim=1) / denom
+                active_pair = (pair_risk_mean >= min_pair_risk_mean).view(-1, 1, 1)
+                mismatch = torch.where(active_pair, mismatch, torch.zeros_like(mismatch))
+            risk = torch.clamp(risk + float(mismatch_cfg.get("weight", 0.10)) * mismatch, 0.0, 1.0)
 
         strength = float(patch_cfg.get("strength", 0.03))
         adaptive_cfg = patch_cfg.get("adaptive_strength", {}) or {}

@@ -305,6 +305,15 @@ edge_dtf_prior:
     combine_with_edge_residual: False
     edge_weight: 0.25
     normalize_components: True
+    calibration_mismatch_boost:
+      enable: False
+      weight: 0.10
+      min_residual: 0.05
+      max_residual: 0.40
+      min_risk: 0.00
+      max_risk: 0.35
+      min_pair_risk_mean: 0.00
+      apply_after_gate: False
     conditional_gate:
       enable: False
       mode: multiply # multiply | hard
@@ -324,6 +333,17 @@ edge_dtf_prior:
         signal: gate_max # gate_max | gate_mean
         threshold: 0.90
         fallback_min_gate: 0.0
+      adaptive:
+        enable: False
+        signal: risk_mean # risk_mean | risk_max | edge_residual_mean | edge_residual_max | gate_mean | gate_max | risk_residual_mean | risk_residual_max | calibration_mismatch_mean | calibration_mismatch_max
+        min_signal: 0.10
+        max_signal: 0.20
+        min_multiplier: 1.0
+        max_multiplier: 1.0
+        min_gate_low: null
+        min_gate_high: null
+        fallback_min_gate_low: null
+        fallback_min_gate_high: null
     adaptive_strength:
       enable: False
       signal: gate_mean # gate_mean | risk_mean

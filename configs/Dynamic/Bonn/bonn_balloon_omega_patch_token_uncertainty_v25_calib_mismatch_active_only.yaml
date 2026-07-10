@@ -1,0 +1,14 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_balloon_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+scene: bonn_balloon_omega_patch_token_uncertainty_v25_calib_mismatch_active_only
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    calibration_mismatch_boost:
+      enable: True
+      weight: 0.04
+      min_residual: 0.04
+      max_residual: 0.28
+      min_risk: 0.00
+      max_risk: 0.25
+      min_pair_risk_mean: 0.14
+      apply_after_gate: False

@@ -1,0 +1,17 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+scene: bonn_crowd2_omega_patch_token_uncertainty_v23_adaptive_risk_residual_oneway
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    conditional_gate:
+      adaptive:
+        enable: True
+        signal: risk_residual_mean
+        min_signal: 0.006
+        max_signal: 0.030
+        min_multiplier: 1.0
+        max_multiplier: 1.08
+        min_gate_low: 0.35
+        min_gate_high: 0.42
+        fallback_min_gate_low: 0.20
+        fallback_min_gate_high: 0.24

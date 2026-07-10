@@ -1,0 +1,17 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v17_patchonly_soft_edge010.yaml
+scene: bonn_person_tracking_omega_patch_token_uncertainty_v20_adaptive_gate
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    conditional_gate:
+      adaptive:
+        enable: True
+        signal: risk_mean
+        min_signal: 0.10
+        max_signal: 0.16
+        min_multiplier: 0.75
+        max_multiplier: 1.15
+        min_gate_low: 0.15
+        min_gate_high: 0.40
+        fallback_min_gate_low: 0.05
+        fallback_min_gate_high: 0.22

@@ -1200,3 +1200,188 @@ Current conclusion:
 - If selecting per-sequence best results, `balloon2` should use v18 (`100.25%`), while all other sequences use v17.
 - Relaxing FPS did not materially hurt the cache pipeline: tracking FPS remains roughly `11.8-15.8`, and full-system FPS remains roughly `6.3-7.7`.
 - The remaining gap is sequence-specific on `balloon2`; the next accuracy-focused step is not more Edge-DTF strength alone, but an adaptive per-sequence gate or confidence threshold that can detect when soft edge damping should increase without over-suppressing reliable constraints.
+
+## Adaptive Gate Trial
+
+Date: 2026-07-10
+
+Goal: test whether the patch-token conditional gate should adapt per edge from the current Omega token risk signal instead of using a fixed gate/fallback floor.
+
+Implementation:
+
+- Added default-off adaptive gate controls under `edge_dtf_prior.patch_token_uncertainty.conditional_gate.adaptive`.
+- The adaptive signal can use `risk_mean`, `risk_max`, `edge_residual_mean`, `edge_residual_max`, `gate_mean`, or `gate_max`.
+- The active trials use `risk_mean` to interpolate gate multiplier, minimum gate, and evidence fallback floor per edge.
+- Baseline and v17 behavior are unchanged when `adaptive.enable: False`.
+
+Validation:
+
+```bash
+/home/czy/anaconda3/envs/droid-w/bin/python -m py_compile src/depth_video.py
+/home/czy/anaconda3/envs/droid-w/bin/python -c "from src.config import load_config; cfg=load_config('configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v21_adaptive_gate_soft.yaml','configs/droid_w.yaml'); print(cfg['edge_dtf_prior']['patch_token_uncertainty']['conditional_gate']['adaptive'])"
+```
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v20_adaptive_gate.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v20_adaptive_gate.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v21_adaptive_gate_soft.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | Method | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Delta vs v17 Full | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | v17 fixed gate | 0.018033 | 0.016987 | 0.018004 | 94.35% | 0.00% | 11.80 | 6.26 |
+| bonn_crowd2 | v20 adaptive gate | 0.017638 | 0.016912 | 0.018004 | 93.94% | -0.44% | 11.77 | 6.24 |
+| bonn_person_tracking | v17 fixed gate | 0.032543 | 0.032876 | 0.034278 | 95.91% | 0.00% | 14.72 | 7.21 |
+| bonn_person_tracking | v20 adaptive gate | 0.032809 | 0.033118 | 0.034278 | 96.62% | +0.74% | 14.82 | 7.27 |
+| bonn_person_tracking | v21 soft adaptive gate | 0.032808 | 0.033170 | 0.034278 | 96.77% | +0.89% | 14.86 | 7.24 |
+
+Current conclusion:
+
+- Adaptive gate is a useful diagnostic and gives a small gain on `bonn_crowd2`, but the current `risk_mean` schedule is not robust enough to replace v17 as the unified default.
+- The negative person result suggests that some high-risk edges are still geometrically useful, so purely risk-driven stronger suppression can over-damp good constraints.
+- Keep v17 as the frozen overall best setting for now. The next adaptive version should gate on calibration mismatch or residual trend, not token risk alone.
+
+## Residual-Trend Adaptive Gate Trial
+
+Date: 2026-07-10
+
+Goal: replace the previous `risk_mean` adaptive signal with a more conservative signal that only reacts when Omega patch-token risk and Edge-DTF residual agree.
+
+Code additions:
+
+- Added adaptive signals:
+  - `risk_residual_mean`
+  - `risk_residual_max`
+  - `calibration_mismatch_mean`
+  - `calibration_mismatch_max`
+- `risk_residual = token_risk * edge_residual`: high only when semantic/token inconsistency and geometric residual are both high.
+- `calibration_mismatch = edge_residual * (1 - token_risk)`: intended to expose over-confident token priors where residual is high despite low token risk.
+- Default behavior remains unchanged unless `conditional_gate.adaptive.enable: True`.
+
+Validation:
+
+```bash
+/home/czy/anaconda3/envs/droid-w/bin/python -m py_compile src/depth_video.py
+/home/czy/anaconda3/envs/droid-w/bin/python -c "from src.config import load_config; cfg=load_config('configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v22_adaptive_risk_residual.yaml','configs/droid_w.yaml'); print(cfg['edge_dtf_prior']['patch_token_uncertainty']['conditional_gate']['adaptive'])"
+```
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v22_adaptive_risk_residual.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v23_adaptive_risk_residual_oneway.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | Method | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Delta vs v17 Full | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_person_tracking | v17 fixed gate | 0.032543 | 0.032876 | 0.034278 | 95.91% | 0.00% | 14.72 | 7.21 |
+| bonn_person_tracking | v22 risk-residual adaptive | 0.033349 | 0.033856 | 0.034278 | 98.77% | +2.98% | 14.85 | 7.25 |
+| bonn_person_tracking | v23 one-way risk-residual adaptive | 0.033910 | 0.034210 | 0.034278 | 99.80% | +4.06% | 14.85 | 7.23 |
+
+Current conclusion:
+
+- `risk_residual_mean` is not a good direct driver for gate floor/multiplier on `bonn_person_tracking`.
+- Even the one-way version, which never reduces the v17 gate/floor, degrades tracking. This suggests that increasing the gate/floor changes the BA balance enough to hurt useful constraints.
+- The next attempt should not keep pushing adaptive gate floor. A better use of calibration mismatch is to create debug bins and/or a small residual-based risk boost for over-confident edges, while leaving the stable v17 gate unchanged.
+
+## Calibration-Mismatch Risk Boost Trial
+
+Date: 2026-07-10
+
+Goal: keep the stable v17 conditional gate unchanged and use calibration mismatch only as a small risk correction. This tests whether over-confident token priors can be corrected without changing the BA gate/floor balance.
+
+Implementation:
+
+- Added `edge_dtf_prior.patch_token_uncertainty.calibration_mismatch_boost`.
+- Mismatch score is computed as:
+  - residual score from `source_edge * residual_dtf`
+  - multiplied by a confidence gap from low current token risk
+- v24 applies this boost directly before the v17 gate.
+- v25 adds `min_pair_risk_mean`, so boost is allowed only on edges already active under the v17 risk filter. This prevents low-risk useful edges from being pulled into suppression.
+- Default behavior remains unchanged because the boost is disabled in `configs/droid_w.yaml`.
+
+Validation:
+
+```bash
+/home/czy/anaconda3/envs/droid-w/bin/python -m py_compile src/depth_video.py
+/home/czy/anaconda3/envs/droid-w/bin/python -c "from src.config import load_config; cfg=load_config('configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml','configs/droid_w.yaml'); print(cfg['edge_dtf_prior']['patch_token_uncertainty']['calibration_mismatch_boost'])"
+git diff --check
+```
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v24_calib_mismatch_boost.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v24_calib_mismatch_boost.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | Method | KF RMSE | Full RMSE | DROID-W Full | Full/DROID-W | Delta vs v17 Full | Tracking FPS | Full FPS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_crowd2 | v17 fixed gate | 0.018033 | 0.016987 | 0.018004 | 94.35% | 0.00% | 11.80 | 6.26 |
+| bonn_crowd2 | v24 mismatch boost | 0.019929 | 0.018723 | 0.018004 | 103.99% | +10.22% | 11.63 | 6.18 |
+| bonn_crowd2 | v25 active-only mismatch boost | 0.017740 | 0.016731 | 0.018004 | 92.93% | -1.51% | 11.73 | 6.21 |
+| bonn_person_tracking | v17 fixed gate | 0.032543 | 0.032876 | 0.034278 | 95.91% | 0.00% | 14.72 | 7.21 |
+| bonn_person_tracking | v24 mismatch boost | 0.032506 | 0.032887 | 0.034278 | 95.94% | +0.03% | 14.82 | 7.26 |
+| bonn_person_tracking | v25 active-only mismatch boost | 0.032322 | 0.032727 | 0.034278 | 95.47% | -0.45% | 14.85 | 7.23 |
+
+Current conclusion:
+
+- v24 confirms the danger of using calibration mismatch too broadly: `crowd2` degrades because low-risk/high-residual edges can be incorrectly pulled into suppression.
+- v25 is the first calibration-mismatch variant that improves both tested sequences while keeping FPS essentially unchanged.
+- v25 is now the best candidate after v17: it keeps v17's stable gate, adds a small over-confidence correction only on already-active risky edges, and improves both `crowd2` and `person_tracking` in this two-sequence test.
+- Next step: run v25 on the remaining Bonn sequences, with special attention to `balloon2`, where v17 was slightly above DROID-W.
+
+## V25 Bonn Full Run
+
+Date: 2026-07-10
+
+Goal: evaluate the active-only calibration-mismatch boost on all Bonn dynamic sequences.
+
+Experiment commands:
+
+```bash
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_balloon2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_moving_nonobstructing_box2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+conda run -n droid-w python run.py --config configs/Dynamic/Bonn/bonn_person_tracking2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+```
+
+ATE RMSE in meters. FPS is from each output `timer_summary.csv`.
+
+| Sequence | KF RMSE | Full RMSE | DROID-W Full | v17 Full | Full/DROID-W | Full/v17 | Tracking FPS | Full FPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| bonn_balloon | 0.026720 | 0.025262 | 0.026447 | 0.025184 | 95.52% | 100.31% | 14.81 | 7.45 |
+| bonn_balloon2 | 0.027778 | 0.024713 | 0.024623 | 0.024725 | 100.36% | 99.95% | 13.65 | 7.03 |
+| bonn_crowd | 0.014546 | 0.012888 | 0.013215 | 0.013056 | 97.53% | 98.71% | 12.07 | 6.42 |
+| bonn_crowd2 | 0.017740 | 0.016731 | 0.018004 | 0.016987 | 92.93% | 98.49% | 11.73 | 6.21 |
+| bonn_moving_nonobstructing_box | 0.014741 | 0.014816 | 0.014748 | 0.014729 | 100.46% | 100.59% | 15.86 | 7.76 |
+| bonn_moving_nonobstructing_box2 | 0.025111 | 0.023439 | 0.023466 | 0.023437 | 99.88% | 100.01% | 15.47 | 7.61 |
+| bonn_person_tracking | 0.032322 | 0.032727 | 0.034278 | 0.032876 | 95.47% | 99.55% | 14.85 | 7.23 |
+| bonn_person_tracking2 | 0.029670 | 0.029830 | 0.029595 | 0.029497 | 100.79% | 101.13% | 15.60 | 7.57 |
+
+Summary:
+
+- Mean Full/DROID-W ratio is `97.87%`, so v25 remains better than original DROID-W on average.
+- Mean Full/v17 ratio is `99.84%`, so v25 is essentially tied with the frozen v17 overall while improving `crowd`, `crowd2`, `person_tracking`, and slightly `balloon2`.
+- v25 fixes the earlier `balloon2` issue relative to v17, but slightly regresses `balloon`, `moving_nonobstructing_box`, and `person_tracking2`.
+- FPS stays close to v17: tracking FPS is `11.73-15.86`, full-system FPS is `6.21-7.76`.
+
+Current conclusion:
+
+- v25 is a reasonable unified Bonn candidate because it adds calibration-mismatch correction with almost no speed cost and preserves the v17 average.
+- It is not strictly better on every sequence. For per-sequence best reporting, keep v17 for `balloon`, `moving_nonobstructing_box`, `moving_nonobstructing_box2`, and `person_tracking2`; use v25 for `balloon2`, `crowd`, `crowd2`, and `person_tracking`.
+- The next improvement should make the mismatch boost self-disable on low-mismatch/static-like sequences, likely using per-sequence calibration histograms rather than another global threshold sweep.
