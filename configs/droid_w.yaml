@@ -314,6 +314,95 @@ edge_dtf_prior:
       max_risk: 0.35
       min_pair_risk_mean: 0.00
       apply_after_gate: False
+    reliability_remap:
+      enable: False
+      mode: smoothstep # smoothstep | sigmoid | linear
+      weight: 0.04
+      apply_after_gate: False
+      min_residual: 0.04
+      max_residual: 0.28
+      min_risk: 0.00
+      max_risk: 0.25
+      min_mismatch: 0.02
+      max_mismatch: 0.35
+      edge_min_mismatch: 0.02
+      edge_max_mismatch: 0.10
+      edge_min_coverage: 0.00
+      coverage_threshold: 0.20
+      residual_weight: 1.0
+      confidence_gap_weight: 1.0
+      selective:
+        enable: False
+        min_valid_fraction: 0.00
+        min_edge_residual_mean: 0.00
+        max_edge_residual_mean: 0.10
+        residual_coverage_threshold: 0.10
+        min_residual_coverage: 0.00
+        max_residual_coverage: 0.10
+        mismatch_coverage_threshold: 0.08
+        min_mismatch_coverage: 0.00
+        max_mismatch_coverage: 0.08
+        protect_low_residual_edges: False
+        low_residual_protect_min: 0.00
+        low_residual_protect_max: 0.03
+    dense_map:
+      enable: False
+      ema: 0.80
+      apply_to_scale: False
+      strength: 0.01
+      min_scale: 0.99
+      max_scale: 1.0
+      save_visuals: False
+      every_n_updates: 200
+      max_visuals: 64
+      output_dir: dense_patch_token_uncertainty
+      temporal_agreement:
+        enable: False
+        mode: mask # mask | boost | adaptive_boost
+        warmup_updates: 50
+        min_dense_risk: 0.15
+        min_current_risk: 0.10
+        boost_strength: 0.003
+        boost_min_scale: 0.997
+        adaptive_signal: calibration_mismatch # calibration_mismatch | residual
+        adaptive_min_signal: 0.05
+        adaptive_max_signal: 0.35
+        adaptive_min_strength: 0.0
+        adaptive_max_strength: 0.006
+        residual_min: 0.05
+        residual_max: 0.40
+        risk_min: 0.0
+        risk_max: 0.35
+        activation:
+          enable: False
+          mode: hard # hard | soft
+          signal: calibration_mismatch_mean # calibration_mismatch_mean | calibration_mismatch_max | residual_mean | residual_max
+          min_signal: 0.05
+          max_signal: 0.10
+          min_multiplier: 0.0
+          max_multiplier: 1.0
+          min_agreement_coverage: 0.02
+    low_parallax_adaptive:
+      enable: False
+      mode: smoothstep # smoothstep | linear
+      beta: 0.75
+      min_distance: 0.0
+      max_distance: 4.0
+      use_residual_gate: True
+      min_residual_mean: 0.015
+      max_residual_mean: 0.060
+      risk_gain: 0.0
+      strength_boost: 0.0
+      graph_support:
+        enable: False
+        signal: active_coverage # active_coverage | mean_alpha_ema
+        activation_threshold: 0.05
+        min_coverage: 0.03
+        max_coverage: 0.10
+        ema_decay: 0.80
+        min_mean_alpha: 0.006
+        max_mean_alpha: 0.016
+        mode: smoothstep # smoothstep | linear
     conditional_gate:
       enable: False
       mode: multiply # multiply | hard

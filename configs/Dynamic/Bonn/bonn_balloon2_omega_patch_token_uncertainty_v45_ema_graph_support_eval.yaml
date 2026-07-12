@@ -1,0 +1,27 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_balloon2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+scene: bonn_balloon2_omega_patch_token_uncertainty_v45_ema_graph_support_eval
+
+tracking:
+  uncertainty_params:
+    visualize: False
+
+edge_dtf_prior:
+  patch_token_uncertainty:
+    low_parallax_adaptive:
+      enable: True
+      mode: smoothstep
+      beta: 0.75
+      min_distance: 0.0
+      max_distance: 4.0
+      use_residual_gate: True
+      min_residual_mean: 0.015
+      max_residual_mean: 0.060
+      risk_gain: 0.0
+      strength_boost: 0.35
+      graph_support:
+        enable: True
+        signal: mean_alpha_ema
+        ema_decay: 0.80
+        min_mean_alpha: 0.006
+        max_mean_alpha: 0.016
+        mode: smoothstep

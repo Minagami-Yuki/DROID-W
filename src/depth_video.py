@@ -83,8 +83,13 @@ class DepthVideo:
         self.omega_patch_token_dim = int(patch_token_cfg.get("token_dim", 8))
         self.omega_patch_maps = torch.zeros(buffer, self.omega_patch_token_dim, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
         self.omega_patch_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        self.omega_dense_patch_risk = torch.zeros(buffer, ht//self.down_scale, wd//self.down_scale, device=self.device, dtype=torch.float).share_memory_()
+        self.omega_dense_patch_valid = torch.zeros(buffer, device=self.device, dtype=torch.bool).share_memory_()
+        self._dense_patch_map_update = 0
+        self._dense_patch_map_visual_count = 0
         self._patch_token_stats_call = 0
         self._patch_token_stats_header_written = False
+        self._low_parallax_support_ema = None
         ### feature attributes ###
         self.fmaps = torch.zeros(buffer, 1, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
         self.nets = torch.zeros(buffer, 128, ht//self.down_scale, wd//self.down_scale, dtype=torch.half, device=self.device).share_memory_()
@@ -282,9 +287,13 @@ class DepthVideo:
                 )[0]
             self.omega_patch_maps[index] = F.normalize(omega_patch_map, p=2, dim=0, eps=1e-6)
             self.omega_patch_valid[index] = True
+            self.omega_dense_patch_risk[index].zero_()
+            self.omega_dense_patch_valid[index] = False
         else:
             self.omega_patch_maps[index].zero_()
             self.omega_patch_valid[index] = False
+            self.omega_dense_patch_risk[index].zero_()
+            self.omega_dense_patch_valid[index] = False
 
     def __setitem__(self, index, item):
         with self.get_lock():
@@ -780,6 +789,229 @@ class DepthVideo:
         if bool(patch_cfg.get("normalize_components", True)):
             risk = risk / max(total, 1e-6)
 
+        remap_debug = None
+
+        def apply_reliability_remap(risk_in, remap_cfg):
+            nonlocal remap_debug
+            edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+            min_residual = float(remap_cfg.get("min_residual", 0.04))
+            max_residual = float(remap_cfg.get("max_residual", 0.28))
+            residual_score = torch.clamp(
+                (edge_residual - min_residual) / max(max_residual - min_residual, 1e-6),
+                0.0,
+                1.0,
+            )
+            min_risk = float(remap_cfg.get("min_risk", 0.0))
+            max_risk = float(remap_cfg.get("max_risk", 0.25))
+            confidence_gap = 1.0 - torch.clamp(
+                (torch.clamp(risk_in, 0.0, 1.0) - min_risk) / max(max_risk - min_risk, 1e-6),
+                0.0,
+                1.0,
+            )
+            mismatch = torch.pow(residual_score, float(remap_cfg.get("residual_weight", 1.0)))
+            mismatch = mismatch * torch.pow(
+                confidence_gap,
+                float(remap_cfg.get("confidence_gap_weight", 1.0)),
+            )
+
+            pixel_alpha = torch.clamp(
+                (
+                    mismatch
+                    - float(remap_cfg.get("min_mismatch", 0.02))
+                )
+                / max(
+                    float(remap_cfg.get("max_mismatch", 0.35))
+                    - float(remap_cfg.get("min_mismatch", 0.02)),
+                    1e-6,
+                ),
+                0.0,
+                1.0,
+            )
+            mode = remap_cfg.get("mode", "smoothstep")
+            if mode == "smoothstep":
+                pixel_alpha = pixel_alpha * pixel_alpha * (3.0 - 2.0 * pixel_alpha)
+            elif mode == "sigmoid":
+                center = float(remap_cfg.get("sigmoid_center", 0.5))
+                temperature = max(float(remap_cfg.get("sigmoid_temperature", 0.15)), 1e-6)
+                pixel_alpha = torch.sigmoid((pixel_alpha - center) / temperature)
+            elif mode == "linear":
+                pass
+            else:
+                raise ValueError(
+                    f"edge_dtf_prior.patch_token_uncertainty.reliability_remap.mode "
+                    f"must be 'smoothstep', 'sigmoid', or 'linear', got {mode}"
+                )
+
+            valid = valid_pixel.detach().bool()
+            flat_valid = valid.reshape(valid.shape[0], -1)
+            denom = flat_valid.sum(dim=1).clamp(min=1).float()
+            flat_mismatch = mismatch.detach().reshape(mismatch.shape[0], -1)
+            edge_mismatch = (flat_mismatch * flat_valid.float()).sum(dim=1) / denom
+            flat_edge_residual = edge_residual.detach().reshape(edge_residual.shape[0], -1)
+            edge_residual_mean = (flat_edge_residual * flat_valid.float()).sum(dim=1) / denom
+            edge_alpha = torch.clamp(
+                (
+                    edge_mismatch
+                    - float(remap_cfg.get("edge_min_mismatch", 0.02))
+                )
+                / max(
+                    float(remap_cfg.get("edge_max_mismatch", 0.10))
+                    - float(remap_cfg.get("edge_min_mismatch", 0.02)),
+                    1e-6,
+                ),
+                0.0,
+                1.0,
+            )
+            if mode == "smoothstep":
+                edge_alpha = edge_alpha * edge_alpha * (3.0 - 2.0 * edge_alpha)
+
+            selective_alpha = torch.ones_like(edge_alpha)
+            residual_coverage = torch.zeros_like(edge_alpha)
+            mismatch_coverage = torch.zeros_like(edge_alpha)
+            selective_cfg = remap_cfg.get("selective", {}) or {}
+            if bool(selective_cfg.get("enable", False)):
+                full_pixels = max(float(valid.shape[-2] * valid.shape[-1]), 1.0)
+                valid_fraction = flat_valid.float().sum(dim=1) / full_pixels
+
+                min_valid_fraction = float(selective_cfg.get("min_valid_fraction", 0.0))
+                if min_valid_fraction > 0.0:
+                    selective_alpha = torch.where(
+                        valid_fraction >= min_valid_fraction,
+                        selective_alpha,
+                        torch.zeros_like(selective_alpha),
+                    )
+
+                min_edge_residual_mean = float(selective_cfg.get("min_edge_residual_mean", 0.0))
+                if min_edge_residual_mean > 0.0:
+                    max_edge_residual_mean = float(
+                        selective_cfg.get("max_edge_residual_mean", min_edge_residual_mean)
+                    )
+                    residual_alpha = torch.clamp(
+                        (edge_residual_mean - min_edge_residual_mean)
+                        / max(max_edge_residual_mean - min_edge_residual_mean, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    residual_alpha = residual_alpha * residual_alpha * (3.0 - 2.0 * residual_alpha)
+                    selective_alpha = selective_alpha * residual_alpha
+
+                min_residual_coverage = float(selective_cfg.get("min_residual_coverage", 0.0))
+                if min_residual_coverage > 0.0:
+                    residual_coverage = (
+                        ((edge_residual.detach() >= float(selective_cfg.get("residual_coverage_threshold", 0.10))) & valid)
+                        .reshape(edge_residual.shape[0], -1)
+                        .float()
+                        .sum(dim=1)
+                        / denom
+                    )
+                    max_residual_coverage = float(
+                        selective_cfg.get("max_residual_coverage", min_residual_coverage)
+                    )
+                    residual_coverage_alpha = torch.clamp(
+                        (residual_coverage - min_residual_coverage)
+                        / max(max_residual_coverage - min_residual_coverage, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    residual_coverage_alpha = (
+                        residual_coverage_alpha
+                        * residual_coverage_alpha
+                        * (3.0 - 2.0 * residual_coverage_alpha)
+                    )
+                    selective_alpha = selective_alpha * residual_coverage_alpha
+
+                min_mismatch_coverage = float(selective_cfg.get("min_mismatch_coverage", 0.0))
+                if min_mismatch_coverage > 0.0:
+                    mismatch_coverage = (
+                        ((mismatch.detach() >= float(selective_cfg.get("mismatch_coverage_threshold", 0.08))) & valid)
+                        .reshape(mismatch.shape[0], -1)
+                        .float()
+                        .sum(dim=1)
+                        / denom
+                    )
+                    max_mismatch_coverage = float(
+                        selective_cfg.get("max_mismatch_coverage", min_mismatch_coverage)
+                    )
+                    mismatch_coverage_alpha = torch.clamp(
+                        (mismatch_coverage - min_mismatch_coverage)
+                        / max(max_mismatch_coverage - min_mismatch_coverage, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    mismatch_coverage_alpha = (
+                        mismatch_coverage_alpha
+                        * mismatch_coverage_alpha
+                        * (3.0 - 2.0 * mismatch_coverage_alpha)
+                    )
+                    selective_alpha = selective_alpha * mismatch_coverage_alpha
+
+                if bool(selective_cfg.get("protect_low_residual_edges", False)):
+                    low_min = float(selective_cfg.get("low_residual_protect_min", 0.0))
+                    low_max = float(selective_cfg.get("low_residual_protect_max", 0.03))
+                    protect_alpha = torch.clamp(
+                        (edge_residual_mean - low_min) / max(low_max - low_min, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    protect_alpha = protect_alpha * protect_alpha * (3.0 - 2.0 * protect_alpha)
+                    selective_alpha = selective_alpha * protect_alpha
+
+                edge_alpha = edge_alpha * selective_alpha
+
+            if bool((patch_cfg.get("debug_stats", {}) or {}).get("enable", False)):
+                flat_pixel_alpha = pixel_alpha.detach().reshape(pixel_alpha.shape[0], -1)
+                flat_gain_alpha = (edge_alpha.view(-1, 1, 1) * pixel_alpha).detach().reshape(pixel_alpha.shape[0], -1)
+                remap_debug = {
+                    "edge_alpha": edge_alpha.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "selective_alpha": selective_alpha.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "pixel_alpha": pixel_alpha.detach(),
+                    "gain_alpha": (edge_alpha.view(-1, 1, 1) * pixel_alpha).detach(),
+                    "edge_mismatch": edge_mismatch.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "edge_residual_mean": edge_residual_mean.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "valid_fraction": (flat_valid.float().sum(dim=1) / max(float(valid.shape[-2] * valid.shape[-1]), 1.0))
+                    .detach()
+                    .view(-1, 1, 1)
+                    .expand_as(risk_in),
+                    "residual_coverage": residual_coverage.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "mismatch_coverage": mismatch_coverage.detach().view(-1, 1, 1).expand_as(risk_in),
+                    "pixel_alpha_mean": ((flat_pixel_alpha * flat_valid.float()).sum(dim=1) / denom)
+                    .detach()
+                    .view(-1, 1, 1)
+                    .expand_as(risk_in),
+                    "gain_alpha_mean": ((flat_gain_alpha * flat_valid.float()).sum(dim=1) / denom)
+                    .detach()
+                    .view(-1, 1, 1)
+                    .expand_as(risk_in),
+                }
+
+            edge_min_coverage = float(remap_cfg.get("edge_min_coverage", 0.0))
+            if edge_min_coverage > 0.0:
+                coverage_threshold = float(remap_cfg.get("coverage_threshold", 0.20))
+                coverage = (
+                    ((mismatch.detach() >= coverage_threshold) & valid)
+                    .reshape(mismatch.shape[0], -1)
+                    .float()
+                    .sum(dim=1)
+                    / denom
+                )
+                edge_alpha = torch.where(
+                    coverage >= edge_min_coverage,
+                    edge_alpha,
+                    torch.zeros_like(edge_alpha),
+                )
+
+            gain = float(remap_cfg.get("weight", 0.04)) * edge_alpha.view(-1, 1, 1) * pixel_alpha
+            risk_out = torch.clamp(
+                risk_in + gain * (1.0 - torch.clamp(risk_in, 0.0, 1.0)),
+                0.0,
+                1.0,
+            )
+            return torch.where(valid_pixel, risk_out, risk_in)
+
+        remap_cfg = patch_cfg.get("reliability_remap", {}) or {}
+        if bool(remap_cfg.get("enable", False)) and not bool(remap_cfg.get("apply_after_gate", False)):
+            risk = apply_reliability_remap(risk, remap_cfg)
+
         mismatch_cfg = patch_cfg.get("calibration_mismatch_boost", {}) or {}
         if bool(mismatch_cfg.get("enable", False)) and not bool(mismatch_cfg.get("apply_after_gate", False)):
             edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
@@ -808,6 +1040,118 @@ class DepthVideo:
                 active_pair = (pair_risk_mean >= min_pair_risk_mean).view(-1, 1, 1)
                 mismatch = torch.where(active_pair, mismatch, torch.zeros_like(mismatch))
             risk = torch.clamp(risk + float(mismatch_cfg.get("weight", 0.10)) * mismatch, 0.0, 1.0)
+
+        low_parallax_debug = None
+        low_parallax_alpha = None
+        low_parallax_effective_alpha = None
+        low_parallax_cfg = patch_cfg.get("low_parallax_adaptive", {}) or {}
+        if bool(low_parallax_cfg.get("enable", False)):
+            with torch.no_grad():
+                beta = float(low_parallax_cfg.get("beta", self.cfg["tracking"].get("beta", 0.75)))
+                edge_distance = self.distance(
+                    ii.contiguous(),
+                    jj.contiguous(),
+                    beta=beta,
+                    bidirectional=True,
+                ).detach().float().view(-1)
+                min_distance = float(low_parallax_cfg.get("min_distance", 0.0))
+                max_distance = float(low_parallax_cfg.get("max_distance", 4.0))
+                distance_alpha = 1.0 - torch.clamp(
+                    (edge_distance - min_distance) / max(max_distance - min_distance, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                if low_parallax_cfg.get("mode", "smoothstep") == "smoothstep":
+                    distance_alpha = distance_alpha * distance_alpha * (3.0 - 2.0 * distance_alpha)
+                elif low_parallax_cfg.get("mode", "smoothstep") == "linear":
+                    pass
+                else:
+                    raise ValueError(
+                        f"edge_dtf_prior.patch_token_uncertainty.low_parallax_adaptive.mode "
+                        f"must be 'smoothstep' or 'linear', got {low_parallax_cfg.get('mode')}"
+                    )
+                valid = valid_pixel.detach().bool()
+                flat_valid = valid.reshape(valid.shape[0], -1)
+                denom = flat_valid.sum(dim=1).clamp(min=1).float()
+                edge_residual = torch.clamp(source_edge.detach() * residual_dtf.detach(), 0.0, 1.0)
+                residual_mean = (
+                    edge_residual.reshape(edge_residual.shape[0], -1) * flat_valid.float()
+                ).sum(dim=1) / denom
+                min_residual = float(low_parallax_cfg.get("min_residual_mean", 0.0))
+                max_residual = float(low_parallax_cfg.get("max_residual_mean", 0.08))
+                residual_alpha = torch.clamp(
+                    (residual_mean - min_residual) / max(max_residual - min_residual, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                if bool(low_parallax_cfg.get("use_residual_gate", True)):
+                    low_parallax_alpha = distance_alpha * residual_alpha
+                else:
+                    low_parallax_alpha = distance_alpha
+                low_parallax_alpha = torch.clamp(low_parallax_alpha, 0.0, 1.0)
+
+                support_cfg = low_parallax_cfg.get("graph_support", {}) or {}
+                support_gate = torch.ones((), device=low_parallax_alpha.device)
+                active_coverage = torch.ones((), device=low_parallax_alpha.device)
+                support_signal = torch.ones((), device=low_parallax_alpha.device)
+                if bool(support_cfg.get("enable", False)):
+                    activation_threshold = float(support_cfg.get("activation_threshold", 0.05))
+                    active_coverage = (low_parallax_alpha > activation_threshold).float().mean()
+                    support_signal_name = support_cfg.get("signal", "active_coverage")
+                    if support_signal_name == "active_coverage":
+                        support_signal = active_coverage
+                        min_support = float(support_cfg.get("min_coverage", 0.03))
+                        max_support = float(support_cfg.get("max_coverage", 0.10))
+                    elif support_signal_name == "mean_alpha_ema":
+                        current_mean = low_parallax_alpha.mean().detach()
+                        ema_decay = float(support_cfg.get("ema_decay", 0.80))
+                        ema_decay = min(max(ema_decay, 0.0), 0.9999)
+                        if self._low_parallax_support_ema is None:
+                            self._low_parallax_support_ema = current_mean
+                        else:
+                            self._low_parallax_support_ema = (
+                                ema_decay * self._low_parallax_support_ema
+                                + (1.0 - ema_decay) * current_mean
+                            )
+                        support_signal = self._low_parallax_support_ema
+                        min_support = float(support_cfg.get("min_mean_alpha", 0.006))
+                        max_support = float(support_cfg.get("max_mean_alpha", 0.016))
+                    else:
+                        raise ValueError(
+                            "edge_dtf_prior.patch_token_uncertainty.low_parallax_adaptive."
+                            "graph_support.signal must be 'active_coverage' or 'mean_alpha_ema', "
+                            f"got {support_signal_name}"
+                        )
+                    support_gate = torch.clamp(
+                        (support_signal - min_support) / max(max_support - min_support, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                    support_mode = support_cfg.get("mode", "smoothstep")
+                    if support_mode == "smoothstep":
+                        support_gate = support_gate * support_gate * (3.0 - 2.0 * support_gate)
+                    elif support_mode != "linear":
+                        raise ValueError(
+                            "edge_dtf_prior.patch_token_uncertainty.low_parallax_adaptive."
+                            f"graph_support.mode must be 'smoothstep' or 'linear', got {support_mode}"
+                        )
+                low_parallax_effective_alpha = low_parallax_alpha * support_gate
+
+            risk_gain = float(low_parallax_cfg.get("risk_gain", 0.0))
+            if risk_gain > 0.0:
+                alpha = low_parallax_effective_alpha.view(-1, 1, 1)
+                risk = torch.clamp(risk + risk_gain * alpha * (1.0 - torch.clamp(risk, 0.0, 1.0)), 0.0, 1.0)
+
+            if bool((patch_cfg.get("debug_stats", {}) or {}).get("enable", False)):
+                low_parallax_debug = {
+                    "alpha": low_parallax_alpha.detach().view(-1, 1, 1).expand_as(risk),
+                    "effective_alpha": low_parallax_effective_alpha.detach().view(-1, 1, 1).expand_as(risk),
+                    "support_gate": support_gate.detach().view(1, 1, 1).expand_as(risk),
+                    "support_signal": support_signal.detach().view(1, 1, 1).expand_as(risk),
+                    "active_coverage": active_coverage.detach().view(1, 1, 1).expand_as(risk),
+                    "distance": edge_distance.detach().view(-1, 1, 1).expand_as(risk),
+                    "residual_mean": residual_mean.detach().view(-1, 1, 1).expand_as(risk),
+                }
 
         gate_for_adaptive = None
         gate_cfg = patch_cfg.get("conditional_gate", {}) or {}
@@ -977,6 +1321,9 @@ class DepthVideo:
                     f"must be 'multiply' or 'hard', got {mode}"
                 )
 
+        if bool(remap_cfg.get("enable", False)) and bool(remap_cfg.get("apply_after_gate", False)):
+            risk = apply_reliability_remap(risk, remap_cfg)
+
         if bool(mismatch_cfg.get("enable", False)) and bool(mismatch_cfg.get("apply_after_gate", False)):
             edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
             min_residual = float(mismatch_cfg.get("min_residual", 0.05))
@@ -1030,6 +1377,11 @@ class DepthVideo:
             max_multiplier = float(adaptive_cfg.get("max_multiplier", 1.10))
             strength = strength * (min_multiplier + (max_multiplier - min_multiplier) * signal)
 
+        if low_parallax_effective_alpha is not None:
+            strength_boost = float(low_parallax_cfg.get("strength_boost", 0.0))
+            if strength_boost > 0.0:
+                strength = strength * (1.0 + strength_boost * low_parallax_effective_alpha.view(-1, 1, 1))
+
         scale = 1.0 - strength * torch.clamp(risk, 0.0, 1.0)
         scale = torch.clamp(
             scale,
@@ -1064,6 +1416,207 @@ class DepthVideo:
             ).view(-1, 1, 1)
             filter_active = active
             scale = torch.where(active, scale, torch.ones_like(scale))
+
+        dense_cfg = patch_cfg.get("dense_map", {}) or {}
+        dense_temporal_debug = None
+        if bool(dense_cfg.get("enable", False)):
+            temporal_cfg = dense_cfg.get("temporal_agreement", {}) or {}
+            if (
+                bool(temporal_cfg.get("enable", False))
+                and self._dense_patch_map_update >= int(temporal_cfg.get("warmup_updates", 50))
+            ):
+                prior_dense_valid = self.omega_dense_patch_valid[ii].view(-1, 1, 1)
+                prior_dense_risk = torch.where(
+                    prior_dense_valid,
+                    torch.clamp(self.omega_dense_patch_risk[ii], 0.0, 1.0),
+                    torch.zeros_like(scale),
+                )
+                agreement = (
+                    prior_dense_valid
+                    & (prior_dense_risk >= float(temporal_cfg.get("min_dense_risk", 0.15)))
+                    & (torch.clamp(risk, 0.0, 1.0) >= float(temporal_cfg.get("min_current_risk", 0.10)))
+                )
+                agreement_mode = temporal_cfg.get("mode", "mask")
+                if agreement_mode == "mask":
+                    scale = torch.where(agreement, scale, torch.ones_like(scale))
+                elif agreement_mode == "boost":
+                    boost_scale = 1.0 - float(temporal_cfg.get("boost_strength", 0.003)) * prior_dense_risk
+                    boost_scale = torch.clamp(
+                        boost_scale,
+                        min=float(temporal_cfg.get("boost_min_scale", 0.997)),
+                        max=1.0,
+                    )
+                    scale = torch.where(agreement, scale * boost_scale, scale)
+                elif agreement_mode == "adaptive_boost":
+                    edge_residual = torch.clamp(source_edge * residual_dtf, 0.0, 1.0)
+                    residual_score = torch.clamp(
+                        (
+                            edge_residual
+                            - float(temporal_cfg.get("residual_min", 0.05))
+                        )
+                        / max(
+                            float(temporal_cfg.get("residual_max", 0.40))
+                            - float(temporal_cfg.get("residual_min", 0.05)),
+                            1e-6,
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                    risk_score = torch.clamp(
+                        (
+                            torch.clamp(risk, 0.0, 1.0)
+                            - float(temporal_cfg.get("risk_min", 0.0))
+                        )
+                        / max(
+                            float(temporal_cfg.get("risk_max", 0.35))
+                            - float(temporal_cfg.get("risk_min", 0.0)),
+                            1e-6,
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                    if temporal_cfg.get("adaptive_signal", "calibration_mismatch") == "residual":
+                        adaptive_signal = residual_score
+                    elif temporal_cfg.get("adaptive_signal", "calibration_mismatch") == "calibration_mismatch":
+                        adaptive_signal = residual_score * (1.0 - risk_score)
+                    else:
+                        raise ValueError(
+                            f"edge_dtf_prior.patch_token_uncertainty.dense_map."
+                            f"temporal_agreement.adaptive_signal must be 'calibration_mismatch' "
+                            f"or 'residual', got {temporal_cfg.get('adaptive_signal')}"
+                        )
+                    adaptive_alpha = torch.clamp(
+                        (
+                            adaptive_signal
+                            - float(temporal_cfg.get("adaptive_min_signal", 0.05))
+                        )
+                        / max(
+                            float(temporal_cfg.get("adaptive_max_signal", 0.35))
+                            - float(temporal_cfg.get("adaptive_min_signal", 0.05)),
+                            1e-6,
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                    min_strength = float(temporal_cfg.get("adaptive_min_strength", 0.0))
+                    max_strength = float(temporal_cfg.get("adaptive_max_strength", 0.006))
+                    adaptive_strength = min_strength + (max_strength - min_strength) * adaptive_alpha
+                    active_edge = None
+                    activation_cfg = temporal_cfg.get("activation", {}) or {}
+                    if bool(activation_cfg.get("enable", False)):
+                        valid = valid_pixel.detach().bool()
+                        active = (agreement & valid).detach()
+                        flat_valid = valid.reshape(valid.shape[0], -1)
+                        flat_active = active.reshape(active.shape[0], -1)
+                        valid_denom = flat_valid.sum(dim=1).clamp(min=1).float()
+                        active_count = flat_active.sum(dim=1).clamp(min=1).float()
+                        coverage = flat_active.sum(dim=1).float() / valid_denom
+
+                        signal_name = activation_cfg.get("signal", "calibration_mismatch_mean")
+                        flat_mismatch = (residual_score.detach() * (1.0 - risk_score.detach())).reshape(
+                            residual_score.shape[0],
+                            -1,
+                        )
+                        flat_residual = residual_score.detach().reshape(residual_score.shape[0], -1)
+                        if signal_name == "calibration_mismatch_mean":
+                            activation_signal = (flat_mismatch * flat_active.float()).sum(dim=1) / active_count
+                        elif signal_name == "calibration_mismatch_max":
+                            activation_signal = torch.where(
+                                flat_active,
+                                flat_mismatch,
+                                torch.zeros_like(flat_mismatch),
+                            ).max(dim=1).values
+                        elif signal_name == "residual_mean":
+                            activation_signal = (flat_residual * flat_active.float()).sum(dim=1) / active_count
+                        elif signal_name == "residual_max":
+                            activation_signal = torch.where(
+                                flat_active,
+                                flat_residual,
+                                torch.zeros_like(flat_residual),
+                            ).max(dim=1).values
+                        else:
+                            raise ValueError(
+                                f"edge_dtf_prior.patch_token_uncertainty.dense_map."
+                                f"temporal_agreement.activation.signal must be one of "
+                                f"calibration_mismatch_mean, calibration_mismatch_max, "
+                                f"residual_mean, residual_max; got {signal_name}"
+                            )
+
+                        active_edge = coverage >= float(activation_cfg.get("min_agreement_coverage", 0.02))
+                        activation_mode = activation_cfg.get("mode", "hard")
+                        if activation_mode == "hard":
+                            active_edge = (
+                                active_edge
+                                & (activation_signal >= float(activation_cfg.get("min_signal", 0.05)))
+                            ).view(-1, 1, 1)
+                            adaptive_strength = torch.where(
+                                active_edge,
+                                adaptive_strength,
+                                torch.zeros_like(adaptive_strength),
+                            )
+                        elif activation_mode == "soft":
+                            min_signal = float(activation_cfg.get("min_signal", 0.05))
+                            max_signal = float(activation_cfg.get("max_signal", 0.10))
+                            alpha = torch.clamp(
+                                (activation_signal - min_signal) / max(max_signal - min_signal, 1e-6),
+                                0.0,
+                                1.0,
+                            )
+                            min_multiplier = float(activation_cfg.get("min_multiplier", 0.0))
+                            max_multiplier = float(activation_cfg.get("max_multiplier", 1.0))
+                            multiplier = min_multiplier + (max_multiplier - min_multiplier) * alpha
+                            active_edge = active_edge.view(-1, 1, 1)
+                            multiplier = multiplier.view(-1, 1, 1)
+                            adaptive_strength = torch.where(
+                                active_edge,
+                                adaptive_strength * multiplier,
+                                torch.zeros_like(adaptive_strength),
+                            )
+                        else:
+                            raise ValueError(
+                                f"edge_dtf_prior.patch_token_uncertainty.dense_map."
+                                f"temporal_agreement.activation.mode must be 'hard' or 'soft', "
+                                f"got {activation_mode}"
+                            )
+                    boost_scale = 1.0 - adaptive_strength * prior_dense_risk
+                    boost_scale = torch.clamp(
+                        boost_scale,
+                        min=float(temporal_cfg.get("boost_min_scale", 0.997)),
+                        max=1.0,
+                    )
+                    dense_temporal_debug = {
+                        "agreement": agreement.detach().float(),
+                        "prior_dense_risk": prior_dense_risk.detach().float(),
+                        "adaptive_signal": adaptive_signal.detach().float(),
+                        "adaptive_strength": adaptive_strength.detach().float(),
+                        "boost_scale": boost_scale.detach().float(),
+                    }
+                    if active_edge is not None:
+                        dense_temporal_debug["active_edge"] = active_edge.detach().float().expand_as(scale)
+                    scale = torch.where(agreement, scale * boost_scale, scale)
+                else:
+                    raise ValueError(
+                        f"edge_dtf_prior.patch_token_uncertainty.dense_map."
+                        f"temporal_agreement.mode must be 'mask', 'boost', or 'adaptive_boost', "
+                        f"got {agreement_mode}"
+                    )
+
+            self._update_dense_patch_token_uncertainty_map(dense_cfg, ii, valid_pixel, risk)
+            if bool(dense_cfg.get("apply_to_scale", False)):
+                dense_valid = self.omega_dense_patch_valid[ii].view(-1, 1, 1)
+                dense_risk = torch.where(
+                    dense_valid,
+                    torch.clamp(self.omega_dense_patch_risk[ii], 0.0, 1.0),
+                    torch.zeros_like(scale),
+                )
+                dense_scale = 1.0 - float(dense_cfg.get("strength", 0.01)) * dense_risk
+                dense_scale = torch.clamp(
+                    dense_scale,
+                    min=float(dense_cfg.get("min_scale", 0.99)),
+                    max=float(dense_cfg.get("max_scale", 1.0)),
+                )
+                scale = torch.clamp(scale * dense_scale, min=0.0, max=1.0)
+
         self._write_patch_token_uncertainty_stats(
             patch_cfg,
             ii,
@@ -1078,8 +1631,77 @@ class DepthVideo:
             strength,
             filter_signal,
             filter_active,
+            dense_temporal_debug,
+            remap_debug,
+            low_parallax_debug,
         )
         return scale
+
+    @torch.no_grad()
+    def _update_dense_patch_token_uncertainty_map(self, dense_cfg, ii, valid_pixel, risk):
+        if risk.numel() == 0:
+            return
+
+        self._dense_patch_map_update += 1
+        ema = float(dense_cfg.get("ema", 0.80))
+        ema = min(max(ema, 0.0), 0.999)
+
+        risk_detached = torch.clamp(risk.detach().float(), 0.0, 1.0)
+        valid_detached = valid_pixel.detach().bool()
+        unique_indices = torch.unique(ii.detach())
+
+        for frame_idx_tensor in unique_indices:
+            frame_idx = int(frame_idx_tensor.item())
+            edge_mask = ii == frame_idx_tensor
+            if not bool(edge_mask.any()):
+                continue
+
+            valid_edges = valid_detached[edge_mask]
+            count = valid_edges.float().sum(dim=0)
+            if not bool((count > 0).any()):
+                continue
+
+            summed = (risk_detached[edge_mask] * valid_edges.float()).sum(dim=0)
+            dense_risk = torch.where(count > 0, summed / count.clamp(min=1.0), torch.zeros_like(summed))
+
+            previous = self.omega_dense_patch_risk[frame_idx]
+            if bool(self.omega_dense_patch_valid[frame_idx]):
+                updated = torch.where(count > 0, ema * previous + (1.0 - ema) * dense_risk, previous)
+            else:
+                updated = torch.where(count > 0, dense_risk, previous)
+
+            self.omega_dense_patch_risk[frame_idx] = torch.clamp(updated, 0.0, 1.0)
+            self.omega_dense_patch_valid[frame_idx] = True
+
+            self._save_dense_patch_token_uncertainty_visual(dense_cfg, frame_idx)
+
+    @torch.no_grad()
+    def _save_dense_patch_token_uncertainty_visual(self, dense_cfg, frame_idx):
+        if not bool(dense_cfg.get("save_visuals", False)):
+            return
+        every_n_updates = max(int(dense_cfg.get("every_n_updates", 200)), 1)
+        if self._dense_patch_map_update % every_n_updates != 0:
+            return
+        max_visuals = max(int(dense_cfg.get("max_visuals", 64)), 1)
+        if self._dense_patch_map_visual_count >= max_visuals:
+            return
+
+        out_dir = os.path.join(
+            self.output,
+            dense_cfg.get("output_dir", "dense_patch_token_uncertainty"),
+        )
+        os.makedirs(out_dir, exist_ok=True)
+
+        risk_np = self.omega_dense_patch_risk[frame_idx].detach().float().cpu().numpy()
+        risk_np = np.nan_to_num(risk_np, nan=0.0, posinf=1.0, neginf=0.0)
+        risk_np = np.clip(risk_np, 0.0, 1.0)
+        colored = (plt.get_cmap("magma")(risk_np)[..., :3] * 255.0).astype(np.uint8)
+        timestamp = int(self.timestamp[frame_idx].detach().cpu()) if frame_idx < self.counter.value else frame_idx
+        stem = f"dense_patch_uncertainty_kf_{frame_idx:03d}_ts_{timestamp:05d}_u_{self._dense_patch_map_update:06d}"
+        Image.fromarray(colored).save(os.path.join(out_dir, f"{stem}.png"))
+        if bool(dense_cfg.get("save_npy", False)):
+            np.save(os.path.join(out_dir, f"{stem}.npy"), risk_np.astype(np.float32))
+        self._dense_patch_map_visual_count += 1
 
     def _write_patch_token_uncertainty_stats(
         self,
@@ -1096,6 +1718,9 @@ class DepthVideo:
         strength,
         filter_signal=None,
         filter_active=None,
+        dense_temporal_debug=None,
+        remap_debug=None,
+        low_parallax_debug=None,
     ):
         stats_cfg = patch_cfg.get("debug_stats", {}) or {}
         if not bool(stats_cfg.get("enable", False)):
@@ -1131,6 +1756,15 @@ class DepthVideo:
             values["gate"] = gate[:count].detach().float()
         if filter_active is not None:
             values["filter_active"] = filter_active[:count].detach().float().expand_as(values["scale"])
+        if dense_temporal_debug is not None:
+            for name, tensor in dense_temporal_debug.items():
+                values[f"dense_temporal_{name}"] = tensor[:count].detach().float()
+        if remap_debug is not None:
+            for name, tensor in remap_debug.items():
+                values[f"remap_{name}"] = tensor[:count].detach().float()
+        if low_parallax_debug is not None:
+            for name, tensor in low_parallax_debug.items():
+                values[f"low_parallax_{name}"] = tensor[:count].detach().float()
 
         mask = valid_pixel[:count].detach().bool()
         flat_mask = mask.reshape(count, -1)
@@ -1183,6 +1817,73 @@ class DepthVideo:
             else:
                 row["gate_mean"] = ""
                 row["gate_max"] = ""
+            if dense_temporal_debug is not None:
+                row["dense_temporal_agreement_ratio"] = float(masked_mean("dense_temporal_agreement")[k].cpu())
+                row["dense_temporal_prior_risk_mean"] = float(masked_mean("dense_temporal_prior_dense_risk")[k].cpu())
+                row["dense_temporal_adaptive_signal_mean"] = float(masked_mean("dense_temporal_adaptive_signal")[k].cpu())
+                row["dense_temporal_adaptive_signal_max"] = float(masked_max("dense_temporal_adaptive_signal")[k].cpu())
+                row["dense_temporal_strength_mean"] = float(masked_mean("dense_temporal_adaptive_strength")[k].cpu())
+                row["dense_temporal_boost_scale_min"] = float(
+                    torch.where(
+                        flat_mask[k],
+                        values["dense_temporal_boost_scale"][k].reshape(-1),
+                        torch.ones_like(values["dense_temporal_boost_scale"][k].reshape(-1)),
+                    ).min().cpu()
+                )
+                if "dense_temporal_active_edge" in values:
+                    row["dense_temporal_active_edge"] = float(
+                        values["dense_temporal_active_edge"][k].detach().float().mean().cpu()
+                    )
+                else:
+                    row["dense_temporal_active_edge"] = ""
+            else:
+                row["dense_temporal_agreement_ratio"] = ""
+                row["dense_temporal_prior_risk_mean"] = ""
+                row["dense_temporal_adaptive_signal_mean"] = ""
+                row["dense_temporal_adaptive_signal_max"] = ""
+                row["dense_temporal_strength_mean"] = ""
+                row["dense_temporal_boost_scale_min"] = ""
+                row["dense_temporal_active_edge"] = ""
+            if remap_debug is not None:
+                row["remap_edge_alpha"] = float(masked_mean("remap_edge_alpha")[k].cpu())
+                row["remap_selective_alpha"] = float(masked_mean("remap_selective_alpha")[k].cpu())
+                row["remap_pixel_alpha_mean"] = float(masked_mean("remap_pixel_alpha")[k].cpu())
+                row["remap_pixel_alpha_max"] = float(masked_max("remap_pixel_alpha")[k].cpu())
+                row["remap_gain_alpha_mean"] = float(masked_mean("remap_gain_alpha")[k].cpu())
+                row["remap_gain_alpha_max"] = float(masked_max("remap_gain_alpha")[k].cpu())
+                row["remap_edge_mismatch"] = float(masked_mean("remap_edge_mismatch")[k].cpu())
+                row["remap_edge_residual_mean"] = float(masked_mean("remap_edge_residual_mean")[k].cpu())
+                row["remap_valid_fraction"] = float(masked_mean("remap_valid_fraction")[k].cpu())
+                row["remap_residual_coverage"] = float(masked_mean("remap_residual_coverage")[k].cpu())
+                row["remap_mismatch_coverage"] = float(masked_mean("remap_mismatch_coverage")[k].cpu())
+            else:
+                row["remap_edge_alpha"] = ""
+                row["remap_selective_alpha"] = ""
+                row["remap_pixel_alpha_mean"] = ""
+                row["remap_pixel_alpha_max"] = ""
+                row["remap_gain_alpha_mean"] = ""
+                row["remap_gain_alpha_max"] = ""
+                row["remap_edge_mismatch"] = ""
+                row["remap_edge_residual_mean"] = ""
+                row["remap_valid_fraction"] = ""
+                row["remap_residual_coverage"] = ""
+                row["remap_mismatch_coverage"] = ""
+            if low_parallax_debug is not None:
+                row["low_parallax_alpha"] = float(masked_mean("low_parallax_alpha")[k].cpu())
+                row["low_parallax_effective_alpha"] = float(masked_mean("low_parallax_effective_alpha")[k].cpu())
+                row["low_parallax_support_gate"] = float(masked_mean("low_parallax_support_gate")[k].cpu())
+                row["low_parallax_support_signal"] = float(masked_mean("low_parallax_support_signal")[k].cpu())
+                row["low_parallax_active_coverage"] = float(masked_mean("low_parallax_active_coverage")[k].cpu())
+                row["low_parallax_distance"] = float(masked_mean("low_parallax_distance")[k].cpu())
+                row["low_parallax_residual_mean"] = float(masked_mean("low_parallax_residual_mean")[k].cpu())
+            else:
+                row["low_parallax_alpha"] = ""
+                row["low_parallax_effective_alpha"] = ""
+                row["low_parallax_support_gate"] = ""
+                row["low_parallax_support_signal"] = ""
+                row["low_parallax_active_coverage"] = ""
+                row["low_parallax_distance"] = ""
+                row["low_parallax_residual_mean"] = ""
             rows.append(row)
 
         fieldnames = [
@@ -1205,6 +1906,31 @@ class DepthVideo:
             "strength",
             "filter_signal",
             "filter_active",
+            "dense_temporal_agreement_ratio",
+            "dense_temporal_prior_risk_mean",
+            "dense_temporal_adaptive_signal_mean",
+            "dense_temporal_adaptive_signal_max",
+            "dense_temporal_strength_mean",
+            "dense_temporal_boost_scale_min",
+            "dense_temporal_active_edge",
+            "remap_edge_alpha",
+            "remap_selective_alpha",
+            "remap_pixel_alpha_mean",
+            "remap_pixel_alpha_max",
+            "remap_gain_alpha_mean",
+            "remap_gain_alpha_max",
+            "remap_edge_mismatch",
+            "remap_edge_residual_mean",
+            "remap_valid_fraction",
+            "remap_residual_coverage",
+            "remap_mismatch_coverage",
+            "low_parallax_alpha",
+            "low_parallax_effective_alpha",
+            "low_parallax_support_gate",
+            "low_parallax_support_signal",
+            "low_parallax_active_coverage",
+            "low_parallax_distance",
+            "low_parallax_residual_mean",
         ]
         file_exists = os.path.exists(out_path)
         with open(out_path, "a", newline="") as f:

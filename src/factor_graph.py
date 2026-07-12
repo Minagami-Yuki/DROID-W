@@ -222,6 +222,8 @@ class FactorGraph:
             self.video.omega_token_valid[ix] = self.video.omega_token_valid[ix+1]
             self.video.omega_patch_maps[ix] = self.video.omega_patch_maps[ix+1]
             self.video.omega_patch_valid[ix] = self.video.omega_patch_valid[ix+1]
+            self.video.omega_dense_patch_risk[ix] = self.video.omega_dense_patch_risk[ix+1]
+            self.video.omega_dense_patch_valid[ix] = self.video.omega_dense_patch_valid[ix+1]
 
             self.video.nets[ix] = self.video.nets[ix+1]
             self.video.inps[ix] = self.video.inps[ix+1]
