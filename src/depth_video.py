@@ -530,14 +530,27 @@ class DepthVideo:
         if not self.focal_calibration_enabled or motion_only or self._focal_prior is None:
             return
         self._focal_ba_calls += 1
-        if self._focal_ba_calls % max(1, int(cfg.get("every_n_ba", 8))) != 0:
+        bootstrap_cfg = cfg.get("schur_bootstrap", {}) or {}
+        bootstrap_active = (
+            bool(bootstrap_cfg.get("enable", False))
+            and int(bootstrap_cfg.get("start_keyframes", 30)) <= self.counter.value
+            and self.counter.value <= int(bootstrap_cfg.get("end_keyframes", 80))
+        )
+        every_n_ba = int(
+            bootstrap_cfg.get("every_n_ba", 1) if bootstrap_active else cfg.get("every_n_ba", 8)
+        )
+        if self._focal_ba_calls % max(1, every_n_ba) != 0:
             return
         if self.counter.value < int(cfg.get("warmup_keyframes", 20)) or int((ii != jj).sum()) < int(cfg.get("min_edges", 12)):
             return
 
         intrinsics_before = self.intrinsics[0].clone()
         diagnostic_enabled = bool(cfg.get("schur_diagnostics", False))
-        min_hessian = cfg.get("schur_min_hessian")
+        min_hessian = (
+            bootstrap_cfg.get("min_hessian", cfg.get("schur_min_hessian"))
+            if bootstrap_active
+            else cfg.get("schur_min_hessian")
+        )
         loss_before, support, gradient, hessian = self._focal_schur_observability(
             target, weight, ii, jj, intrinsics_before, diagnostic_enabled or min_hessian is not None
         )
@@ -549,6 +562,7 @@ class DepthVideo:
             final_relative = torch.log((self.intrinsics[0, 0] / self._focal_prior[0]).clamp_min(1e-6))
             self._focal_calibration_rows.append({
                 "solver": "droidcalib_schur",
+                "phase": "bootstrap" if bootstrap_active else "tracking",
                 "ba_call": self._focal_ba_calls,
                 "keyframes": self.counter.value,
                 "fx_before": float(intrinsics_before[0]),
@@ -565,6 +579,7 @@ class DepthVideo:
                 "support": float(support),
                 "gradient": float(gradient),
                 "hessian": float(hessian),
+                "hessian_threshold": "" if min_hessian is None else float(min_hessian),
                 "accepted": int(accepted),
                 "reason": reason,
             })
@@ -586,14 +601,24 @@ class DepthVideo:
             float(cfg.get("prior_weight", 5.0)) / float(self._focal_prior[0].square().clamp_min(1e-6)),
             1.0,
         )
-        max_deviation = float(cfg.get("max_log_deviation", 0.15))
+        max_deviation = float(
+            bootstrap_cfg.get("max_log_deviation", cfg.get("max_log_deviation", 0.15))
+            if bootstrap_active
+            else cfg.get("max_log_deviation", 0.15)
+        )
         relative_log = torch.log((self.intrinsics[0, 0] / self._focal_prior[0]).clamp_min(1e-6))
         step_log = torch.log((self.intrinsics[0, 0] / intrinsics_before[0]).clamp_min(1e-6))
-        max_step = float(cfg.get("max_log_step", 0.002))
+        fx_proposed, fy_proposed, step_proposed = self.intrinsics[0, 0].clone(), self.intrinsics[0, 1].clone(), step_log.clone()
+        max_step = float(
+            bootstrap_cfg.get("max_log_step", cfg.get("max_log_step", 0.002))
+            if bootstrap_active
+            else cfg.get("max_log_step", 0.002)
+        )
         if not torch.isfinite(relative_log) or not torch.isfinite(step_log) or relative_log.abs() > max_deviation:
             self.poses.copy_(poses_before)
             self.disps.copy_(disps_before)
             self.intrinsics[0].copy_(intrinsics_before)
+            write_row("bounds", False, fx_proposed, fy_proposed, step_proposed, loss_before)
             return
         if step_log.abs() > max_step:
             scale = float((max_step / step_log.abs()).clamp(max=1.0))
@@ -613,8 +638,30 @@ class DepthVideo:
             self.poses.copy_(poses_before)
             self.disps.copy_(disps_before)
             self.intrinsics[0].copy_(intrinsics_before)
+            write_row("loss_increase", False, fx_proposed, fy_proposed, step_proposed, loss_after)
             return
         self.intrinsics[:self.counter.value, :2] = self.intrinsics[0, :2]
+        write_row("accepted", True, fx_proposed, fy_proposed, step_proposed, loss_after)
+
+    def _focal_schur_observability(self, target, weight, ii, jj, intrinsics, compute_derivatives):
+        """Measure focal information in the post-gating reprojection objective."""
+        if not compute_derivatives:
+            with torch.no_grad():
+                loss, support = self._focal_data_loss(target, weight, ii, jj, intrinsics)
+            nan = torch.full((), float("nan"), device=loss.device)
+            return loss, support, nan, nan
+
+        with torch.enable_grad(), torch.amp.autocast("cuda", enabled=False):
+            current = intrinsics.detach().clone()
+            delta = torch.zeros((), device=self.device, dtype=torch.float32, requires_grad=True)
+            candidate = current.clone()
+            focal_scale = torch.exp(delta)
+            candidate[0] = current[0] * focal_scale
+            candidate[1] = current[1] * focal_scale
+            loss, support = self._focal_data_loss(target, weight, ii, jj, candidate)
+            gradient = torch.autograd.grad(loss, delta, create_graph=True)[0]
+            hessian = torch.autograd.grad(gradient, delta)[0]
+        return loss.detach(), support.detach(), gradient.detach(), hessian.detach()
 
     def _focal_data_loss(self, target, weight, ii, jj, intrinsics):
         """Weighted reprojection objective for the shared focal calibration block."""

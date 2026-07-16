@@ -28,3 +28,20 @@ remains even when no update is accepted.
 
 Outputs are stored below `/data1/czy/Output/DROID-omega/Bonn` using the
 `bonn_<sequence>_omega_droidcalib_schur_h100` naming convention.
+
+## Early Bootstrap Repair
+
+The large-K-error moving-box sequences exposed an H100 failure mode: a strict
+observability gate rejected nearly all early focal updates. The bootstrap runs
+use the same solver and loss rollback, but from keyframes 30 through 80 evaluate
+every BA call with Hessian >= 25, a 0.004 log-focal step limit, and a 0.10 total
+deviation limit. They then return to the H100 tracking gate.
+
+| Sequence | v25 Full/KF | H100 Full/KF | Bootstrap Full/KF |
+| --- | ---: | ---: | ---: |
+| moving_nonobstructing_box | 0.014816 / 0.014741 | 0.017419 / 0.018965 | 0.015068 / 0.016390 |
+| moving_nonobstructing_box2 | 0.023439 / 0.025111 | 0.034278 / 0.037771 | 0.020429 / 0.022172 |
+
+The final log-focal corrections were -0.068825 (box) and -0.039556 (box2),
+leaving each estimate close to the shared Bonn calibration while retaining the
+same loss-increase rollback used by H100.

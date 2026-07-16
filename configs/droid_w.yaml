@@ -97,6 +97,14 @@ tracking:
     max_loss_increase: 0.0
     schur_diagnostics: False
     schur_min_hessian: null # disabled unless a positive focal-information threshold is specified
+    schur_bootstrap:
+      enable: False
+      start_keyframes: 30
+      end_keyframes: 80
+      every_n_ba: 1
+      min_hessian: 25.0
+      max_log_step: 0.004
+      max_log_deviation: 0.10
   pretrained: /home/czy/FanZhu/DROID-Splat/pretrained/droid.pth
   buffer: 350     # maximum number of keyframes that can be stored
   beta: 0.75      # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel
