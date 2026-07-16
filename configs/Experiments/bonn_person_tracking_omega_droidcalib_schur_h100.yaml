@@ -1,0 +1,7 @@
+inherit_from: ./configs/Experiments/bonn_person_tracking_omega_droidcalib_schur_prior5.yaml
+scene: bonn_person_tracking_omega_droidcalib_schur_h100
+
+tracking:
+  focal_calibration:
+    schur_diagnostics: True
+    schur_min_hessian: 100.0

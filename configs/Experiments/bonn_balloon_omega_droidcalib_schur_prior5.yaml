@@ -1,0 +1,6 @@
+inherit_from: ./configs/Experiments/bonn_balloon_omega_focal_ba_prior5.yaml
+scene: bonn_balloon_omega_droidcalib_schur_prior5
+
+tracking:
+  focal_calibration:
+    solver: droidcalib_schur

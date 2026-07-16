@@ -535,12 +535,50 @@ class DepthVideo:
         if self.counter.value < int(cfg.get("warmup_keyframes", 20)) or int((ii != jj).sum()) < int(cfg.get("min_edges", 12)):
             return
 
+        intrinsics_before = self.intrinsics[0].clone()
+        diagnostic_enabled = bool(cfg.get("schur_diagnostics", False))
+        min_hessian = cfg.get("schur_min_hessian")
+        loss_before, support, gradient, hessian = self._focal_schur_observability(
+            target, weight, ii, jj, intrinsics_before, diagnostic_enabled or min_hessian is not None
+        )
+
+        def write_row(reason, accepted, fx_proposed, fy_proposed, step_proposed, loss_after):
+            if not diagnostic_enabled:
+                return
+            final_step = torch.log((self.intrinsics[0, 0] / intrinsics_before[0]).clamp_min(1e-6))
+            final_relative = torch.log((self.intrinsics[0, 0] / self._focal_prior[0]).clamp_min(1e-6))
+            self._focal_calibration_rows.append({
+                "solver": "droidcalib_schur",
+                "ba_call": self._focal_ba_calls,
+                "keyframes": self.counter.value,
+                "fx_before": float(intrinsics_before[0]),
+                "fy_before": float(intrinsics_before[1]),
+                "fx_proposed": float(fx_proposed),
+                "fy_proposed": float(fy_proposed),
+                "fx_after": float(self.intrinsics[0, 0]),
+                "fy_after": float(self.intrinsics[0, 1]),
+                "step_log_proposed": float(step_proposed),
+                "step_log_applied": float(final_step),
+                "relative_log_after": float(final_relative),
+                "loss_before": float(loss_before),
+                "loss_after": float(loss_after),
+                "support": float(support),
+                "gradient": float(gradient),
+                "hessian": float(hessian),
+                "accepted": int(accepted),
+                "reason": reason,
+            })
+            self._write_focal_calibration_rows()
+
+        if min_hessian is not None and (
+            not torch.isfinite(hessian) or float(hessian) < float(min_hessian)
+        ):
+            write_row("low_observability", False, intrinsics_before[0], intrinsics_before[1], 0.0, loss_before)
+            return
+
         backend = load_flow3r_joint_backend()
         poses_before = self.poses.clone()
         disps_before = self.disps.clone()
-        intrinsics_before = self.intrinsics[0].clone()
-        with torch.no_grad():
-            loss_before, _ = self._focal_data_loss(target, weight, ii, jj, intrinsics_before)
         backend.flow3r_ba(
             self.poses, self.disps, self.intrinsics[0], self.zeros, target, weight, eta,
             ii, jj, t0, t1, 1, 2, 1e-4, 0.1, False, True,
