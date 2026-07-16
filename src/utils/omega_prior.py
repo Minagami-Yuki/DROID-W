@@ -45,6 +45,28 @@ class OmegaPriorCache:
         uncertainty = self._load_uncertainty(frame_idx, image_hw) if self.uncertainty_enabled else None
         return depth, uncertainty
 
+    def raw_confidence_shape_score(self, frame_idx: int) -> Optional[float]:
+        """Return a scale-free raw Omega confidence shape statistic.
+
+        The tracker normally normalizes each confidence map before turning it
+        into uncertainty.  Calibration routing instead needs a sequence-level
+        quantity, so it uses the raw-map mean/median ratio.  This is invariant
+        to a global confidence scale and does not depend on image resolution.
+        """
+        if not self.enabled or not self.cache_dir:
+            return None
+        path = self._find_prior_file(frame_idx, "confidence")
+        if path is None:
+            return None
+        confidence = np.asarray(np.load(path), dtype=np.float32)
+        finite = confidence[np.isfinite(confidence)]
+        if finite.size == 0:
+            return None
+        median = float(np.median(finite))
+        if median <= 1e-6:
+            return None
+        return float(np.mean(finite) / median)
+
     def load_tokens_for_frame(self, frame_idx: int) -> Optional[torch.Tensor]:
         if not self.enabled or not self.cache_dir:
             return None

@@ -1,0 +1,10 @@
+inherit_from: ./configs/Experiments/bonn_moving_nonobstructing_box2_omega_droidcalib_schur_stability_v2.yaml
+scene: bonn_moving_nonobstructing_box2_omega_droidcalib_schur_confidence_branch_v1
+
+tracking:
+  focal_calibration:
+    schur_bootstrap:
+      omega_confidence_recovery:
+        enable: True
+        min_samples: 30
+        min_mean_median_ratio: 1.05

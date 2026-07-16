@@ -1,0 +1,2 @@
+inherit_from: ./configs/Experiments/bonn_person_tracking2_omega_droidcalib_schur_confidence_branch_v1.yaml
+scene: bonn_person_tracking2_omega_droidcalib_schur_confidence_branch_v2

@@ -50,6 +50,7 @@ class DepthVideo:
         self._focal_ratio = None
         self._focal_ba_calls = 0
         self._focal_stable_ba_streak = 0
+        self._focal_confidence_shape_scores = []
         self._focal_calibration_rows = []
         self.omega_prior = OmegaPriorCache(cfg, self.device)
         self.edge_dtf_prior = EdgeDTFPrior(cfg, self.device)
@@ -196,6 +197,14 @@ class DepthVideo:
         if item[5] is not None:
             intrinsic = item[5]
             if self.focal_calibration_enabled:
+                # Trajectory filling writes a batch of non-keyframes at once.
+                # Those interpolated poses must not contribute to the online
+                # Omega confidence statistic used for calibration routing.
+                frame_index = item[0]
+                if not torch.is_tensor(frame_index) or torch.numel(frame_index) == 1:
+                    confidence_score = self.omega_prior.raw_confidence_shape_score(int(frame_index))
+                    if confidence_score is not None:
+                        self._focal_confidence_shape_scores.append(confidence_score)
                 if self._focal_prior is None:
                     self._focal_prior = intrinsic[:2].detach().clone()
                     self._focal_ratio = (intrinsic[1] / intrinsic[0]).detach().clone()
@@ -555,12 +564,27 @@ class DepthVideo:
         )
         recovery_cfg = bootstrap_cfg.get("initial_k_recovery", {}) or {}
         initial_focal_px = float(self._focal_prior[0]) * float(self.down_scale)
-        recovery_active = (
+        focal_recovery_active = (
             bootstrap_active
             and bool(recovery_cfg.get("enable", False))
             and initial_focal_px >= float(recovery_cfg.get("focal_min_px", float("inf")))
             and initial_focal_px <= float(recovery_cfg.get("focal_max_px", float("inf")))
         )
+        confidence_recovery_cfg = bootstrap_cfg.get("omega_confidence_recovery", {}) or {}
+        confidence_min_samples = int(confidence_recovery_cfg.get("min_samples", 30))
+        confidence_score = (
+            float(np.median(self._focal_confidence_shape_scores))
+            if self._focal_confidence_shape_scores
+            else float("nan")
+        )
+        confidence_recovery_active = (
+            bootstrap_active
+            and bool(confidence_recovery_cfg.get("enable", False))
+            and len(self._focal_confidence_shape_scores) >= confidence_min_samples
+            and np.isfinite(confidence_score)
+            and confidence_score >= float(confidence_recovery_cfg.get("min_mean_median_ratio", float("inf")))
+        )
+        recovery_active = focal_recovery_active or confidence_recovery_active
         stability_cfg = bootstrap_cfg.get("trajectory_stability", {}) or {}
         stability_enabled = (
             bootstrap_active
@@ -627,6 +651,8 @@ class DepthVideo:
                 "hessian_threshold": "" if min_hessian is None else float(min_hessian),
                 "initial_focal_px": initial_focal_px,
                 "initial_k_recovery": int(recovery_active),
+                "omega_confidence_shape_score": confidence_score,
+                "omega_confidence_recovery": int(confidence_recovery_active),
                 "base_pose_translation_max": "" if base_pose_update is None else base_pose_update["translation_max"],
                 "base_pose_rotation_max": "" if base_pose_update is None else base_pose_update["rotation_max"],
                 "stable_ba_streak": self._focal_stable_ba_streak if stability_enabled else "",

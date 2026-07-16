@@ -141,3 +141,20 @@ without routing person_tracking2 into that risky path.  The next replacement
 for this fixed focal interval must be an Omega-derived calibration confidence
 or a scale-normalized uncertainty signal, so the branch generalizes beyond
 Bonn's shared image resolution and camera family.
+
+## Omega Depth-Confidence Routing: Rejected Proxy
+
+Omega exposes dense `depth_conf` but no direct camera-intrinsics confidence.
+We therefore tested the scale-free per-keyframe raw-confidence shape statistic
+`mean(depth_conf) / median(depth_conf)`, using a 30-keyframe running median
+and a 1.05 recovery threshold.  The offline input-frame summary appeared to
+separate box2 (about 1.08) and person_tracking2 (about 1.00), but the actual
+tracker keyframe stream did not preserve that separation: both sequences
+entered recovery (95 and 100 CSV rows, respectively).  The complete v2 runs
+gave box2 0.022413 m Full / 0.024624 m KF and person_tracking2 0.029719 m Full /
+0.030143 m KF.  This proxy is therefore rejected; it measures content and
+keyframe sampling effects rather than calibration reliability.
+
+The implementation also now skips this statistic during batched trajectory
+filling, where interpolated non-keyframes are written together and must not
+alter the online routing state.
