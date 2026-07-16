@@ -1,0 +1,2 @@
+inherit_from: ./configs/Experiments/bonn_crowd2_omega_focal_ba.yaml
+scene: bonn_crowd2_omega_focal_ba_final

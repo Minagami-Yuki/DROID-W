@@ -43,6 +43,12 @@ class DepthVideo:
             self.printer.print(f"This should not happen for WildGS-SLAM unless you are doing ablation study",FontColor.INFO)
         self.mono_thres = cfg['tracking']['mono_thres']
         self.device = cfg['device']
+        self.focal_calibration_cfg = cfg['tracking'].get('focal_calibration', {}) or {}
+        self.focal_calibration_enabled = bool(self.focal_calibration_cfg.get('enable', False))
+        self._focal_prior = None
+        self._focal_ratio = None
+        self._focal_ba_calls = 0
+        self._focal_calibration_rows = []
         self.omega_prior = OmegaPriorCache(cfg, self.device)
         self.edge_dtf_prior = EdgeDTFPrior(cfg, self.device)
         self.down_scale = 8
@@ -186,7 +192,17 @@ class DepthVideo:
             # self.disps[index] = torch.where(mono_depth>0, 1.0/mono_depth, 0)
 
         if item[5] is not None:
-            self.intrinsics[index] = item[5]
+            intrinsic = item[5]
+            if self.focal_calibration_enabled:
+                if self._focal_prior is None:
+                    self._focal_prior = intrinsic[:2].detach().clone()
+                    self._focal_ratio = (intrinsic[1] / intrinsic[0]).detach().clone()
+                else:
+                    # The sequence shares one camera. New keyframes must use the
+                    # current calibrated focal, not the original dataset input.
+                    intrinsic = intrinsic.clone()
+                    intrinsic[..., :2] = self.intrinsics[0, :2]
+            self.intrinsics[index] = intrinsic
 
         if len(item) > 6 and item[6] is not None:
             self.fmaps[index] = item[6]
@@ -501,6 +517,114 @@ class DepthVideo:
                     self.debug)          # t0, t1: window of keyframes for BA
             
             self.disps.clamp_(min=1e-5)
+            self._maybe_calibrate_focal(target, weight, ii, jj, motion_only)
+
+    def _focal_data_loss(self, target, weight, ii, jj, intrinsics):
+        """Weighted reprojection objective for the shared focal calibration block."""
+        count = self.counter.value
+        poses = lietorch.SE3(self.poses[:count].detach()[None])
+        disps = self.disps[:count].detach()[None]
+        intrinsics = intrinsics[None, None].expand(1, count, -1)
+        coords, valid = pops.projective_transform(poses, disps, intrinsics, ii, jj)
+
+        target_xy = target.permute(0, 2, 3, 1)[None]
+        pixel_weight = weight.permute(0, 2, 3, 1).mean(dim=-1)[None]
+        edge_mask = (ii != jj).float()[None, :, None, None]
+        mask = valid[..., 0] * edge_mask
+        numerator = (pixel_weight * mask * (target_xy - coords).square().sum(dim=-1)).sum()
+        denominator = (pixel_weight * mask).sum().clamp_min(1e-6)
+        return numerator / denominator, denominator
+
+    def _write_focal_calibration_rows(self):
+        if not self._focal_calibration_rows:
+            return
+        os.makedirs(self.output, exist_ok=True)
+        path = os.path.join(self.output, "focal_calibration.csv")
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self._focal_calibration_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(self._focal_calibration_rows)
+
+    def _maybe_calibrate_focal(self, target, weight, ii, jj, motion_only):
+        """Alternating focal-only joint BA, adapted from flow3r's focal model.
+
+        The DROID-W CUDA backend remains responsible for the pose/depth Schur
+        step. This block optimizes the single shared focal increment from the
+        same post-gating factors, then feeds that K into the next BA iteration.
+        """
+        cfg = self.focal_calibration_cfg
+        if not self.focal_calibration_enabled or motion_only or self._focal_prior is None:
+            return
+        self._focal_ba_calls += 1
+        every = max(1, int(cfg.get("every_n_ba", 8)))
+        if self._focal_ba_calls % every != 0:
+            return
+        if self.counter.value < int(cfg.get("warmup_keyframes", 20)):
+            return
+        if int((ii != jj).sum().item()) < int(cfg.get("min_edges", 12)):
+            return
+
+        calibration_weight = weight
+        if not bool(cfg.get("use_reliable_weights", True)):
+            calibration_weight = torch.ones_like(weight)
+
+        with torch.enable_grad(), torch.amp.autocast('cuda', enabled=False):
+            current = self.intrinsics[0].detach().clone()
+            relative_log = torch.log((current[0] / self._focal_prior[0]).clamp_min(1e-6))
+            delta = torch.zeros((), device=self.device, dtype=torch.float32, requires_grad=True)
+
+            def candidate_intrinsics(update):
+                scale = torch.exp(update)
+                candidate = current.clone()
+                candidate[0] = current[0] * scale
+                candidate[1] = current[1] * scale
+                return candidate
+
+            before, support = self._focal_data_loss(target, calibration_weight, ii, jj, candidate_intrinsics(delta))
+            min_support = float(cfg.get("min_weighted_pixels", 1024.0))
+            if float(support.detach()) < min_support:
+                return
+            prior_weight = float(cfg.get("prior_weight", 20.0))
+            objective = before + prior_weight * (relative_log + delta).square()
+            gradient = torch.autograd.grad(objective, delta, create_graph=True)[0]
+            hessian = torch.autograd.grad(gradient, delta)[0]
+            min_hessian = float(cfg.get("min_hessian", 1e-3))
+            if not torch.isfinite(hessian) or float(hessian.detach()) < min_hessian:
+                return
+
+            damping = float(cfg.get("gn_damping", 1e-3))
+            max_step = float(cfg.get("max_log_step", 0.002))
+            step = torch.clamp(-gradient / (hessian + damping), -max_step, max_step).detach()
+            max_deviation = float(cfg.get("max_log_deviation", 0.15))
+            proposed_total = torch.clamp(relative_log + step, -max_deviation, max_deviation)
+            accepted_step = proposed_total - relative_log
+            proposed = candidate_intrinsics(accepted_step)
+            with torch.no_grad():
+                after, _ = self._focal_data_loss(target, calibration_weight, ii, jj, proposed)
+            tolerance = float(cfg.get("max_loss_increase", 0.0))
+            accepted = bool(torch.isfinite(after) and after <= before.detach() * (1.0 + tolerance))
+
+        row = {
+            "ba_call": self._focal_ba_calls,
+            "keyframes": self.counter.value,
+            "fx_before": float(current[0]),
+            "fy_before": float(current[1]),
+            "step_log_f": float(accepted_step),
+            "hessian": float(hessian.detach()),
+            "loss_before": float(before.detach()),
+            "loss_after": float(after),
+            "accepted": int(accepted),
+        }
+        if accepted:
+            self.intrinsics[:self.counter.value, 0] = proposed[0]
+            self.intrinsics[:self.counter.value, 1] = proposed[1]
+            row["fx_after"] = float(proposed[0])
+            row["fy_after"] = float(proposed[1])
+        else:
+            row["fx_after"] = float(current[0])
+            row["fy_after"] = float(current[1])
+        self._focal_calibration_rows.append(row)
+        self._write_focal_calibration_rows()
 
     def apply_omega_edge_weight(self, weight, ii, jj):
         if not self.omega_prior.uncertainty_enabled:

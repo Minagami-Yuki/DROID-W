@@ -1,0 +1,28 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_crowd2_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+
+scene: bonn_crowd2_omega_focal_ba
+setup_seed: 43
+
+# VGGT-Omega median over the first 12 RGB frames.
+cam:
+  fx: 567.059204
+  fy: 566.406799
+  cx: 320.0
+  cy: 240.0
+
+tracking:
+  uncertainty_params:
+    visualize: False
+  focal_calibration:
+    enable: True
+    # Conservative production schedule after the 128-frame smoke test.
+    warmup_keyframes: 20
+    every_n_ba: 8
+    min_edges: 12
+    min_weighted_pixels: 1024.0
+    prior_weight: 20.0
+    min_hessian: 0.001
+    gn_damping: 0.001
+    max_log_step: 0.002
+    max_log_deviation: 0.15
+    max_loss_increase: 0.0

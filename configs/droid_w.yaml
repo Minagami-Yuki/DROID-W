@@ -79,6 +79,21 @@ mapping:
     uncer_depth_mult: 0.2
 
 tracking:
+  focal_calibration:
+    enable: False
+    # Shared-focal alternating joint BA. Omega provides the initial K; only
+    # fx/fy are updated with a fixed ratio while cx/cy remain fixed.
+    warmup_keyframes: 20
+    every_n_ba: 8
+    use_reliable_weights: True
+    min_edges: 12
+    min_weighted_pixels: 1024.0
+    prior_weight: 20.0
+    min_hessian: 0.001
+    gn_damping: 0.001
+    max_log_step: 0.002
+    max_log_deviation: 0.15
+    max_loss_increase: 0.0
   pretrained: /home/czy/FanZhu/DROID-Splat/pretrained/droid.pth
   buffer: 350     # maximum number of keyframes that can be stored
   beta: 0.75      # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel
