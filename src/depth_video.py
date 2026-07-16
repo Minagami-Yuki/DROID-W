@@ -517,7 +517,66 @@ class DepthVideo:
                     self.debug)          # t0, t1: window of keyframes for BA
             
             self.disps.clamp_(min=1e-5)
-            self._maybe_calibrate_focal(target, weight, ii, jj, motion_only)
+            solver = self.focal_calibration_cfg.get("solver", "alternating")
+            if solver in {"droidcalib_schur", "flow3r_schur"}:
+                self._maybe_flow3r_focal_schur(target, weight, eta, ii, jj, t0, t1, motion_only)
+            else:
+                self._maybe_calibrate_focal(target, weight, ii, jj, motion_only)
+
+    def _maybe_flow3r_focal_schur(self, target, weight, eta, ii, jj, t0, t1, motion_only):
+        from src.utils.flow3r_joint_ba import load_flow3r_joint_backend
+
+        cfg = self.focal_calibration_cfg
+        if not self.focal_calibration_enabled or motion_only or self._focal_prior is None:
+            return
+        self._focal_ba_calls += 1
+        if self._focal_ba_calls % max(1, int(cfg.get("every_n_ba", 8))) != 0:
+            return
+        if self.counter.value < int(cfg.get("warmup_keyframes", 20)) or int((ii != jj).sum()) < int(cfg.get("min_edges", 12)):
+            return
+
+        backend = load_flow3r_joint_backend()
+        poses_before = self.poses.clone()
+        disps_before = self.disps.clone()
+        intrinsics_before = self.intrinsics[0].clone()
+        with torch.no_grad():
+            loss_before, _ = self._focal_data_loss(target, weight, ii, jj, intrinsics_before)
+        backend.flow3r_ba(
+            self.poses, self.disps, self.intrinsics[0], self.zeros, target, weight, eta,
+            ii, jj, t0, t1, 1, 2, 1e-4, 0.1, False, True,
+            float(self._focal_prior[0]),
+            float(cfg.get("prior_weight", 5.0)) / float(self._focal_prior[0].square().clamp_min(1e-6)),
+            1.0,
+        )
+        max_deviation = float(cfg.get("max_log_deviation", 0.15))
+        relative_log = torch.log((self.intrinsics[0, 0] / self._focal_prior[0]).clamp_min(1e-6))
+        step_log = torch.log((self.intrinsics[0, 0] / intrinsics_before[0]).clamp_min(1e-6))
+        max_step = float(cfg.get("max_log_step", 0.002))
+        if not torch.isfinite(relative_log) or not torch.isfinite(step_log) or relative_log.abs() > max_deviation:
+            self.poses.copy_(poses_before)
+            self.disps.copy_(disps_before)
+            self.intrinsics[0].copy_(intrinsics_before)
+            return
+        if step_log.abs() > max_step:
+            scale = float((max_step / step_log.abs()).clamp(max=1.0))
+            self.poses.copy_(poses_before)
+            self.disps.copy_(disps_before)
+            self.intrinsics[0].copy_(intrinsics_before)
+            backend.flow3r_ba(
+                self.poses, self.disps, self.intrinsics[0], self.zeros, target, weight, eta,
+                ii, jj, t0, t1, 1, 2, 1e-4, 0.1, False, True,
+                float(self._focal_prior[0]),
+                float(cfg.get("prior_weight", 5.0)) / float(self._focal_prior[0].square().clamp_min(1e-6)),
+                scale,
+            )
+        with torch.no_grad():
+            loss_after, _ = self._focal_data_loss(target, weight, ii, jj, self.intrinsics[0])
+        if not torch.isfinite(loss_after) or loss_after > loss_before:
+            self.poses.copy_(poses_before)
+            self.disps.copy_(disps_before)
+            self.intrinsics[0].copy_(intrinsics_before)
+            return
+        self.intrinsics[:self.counter.value, :2] = self.intrinsics[0, :2]
 
     def _focal_data_loss(self, target, weight, ii, jj, intrinsics):
         """Weighted reprojection objective for the shared focal calibration block."""

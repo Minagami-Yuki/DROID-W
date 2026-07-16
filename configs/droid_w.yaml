@@ -81,7 +81,8 @@ mapping:
 tracking:
   focal_calibration:
     enable: False
-    # Shared-focal alternating joint BA. Omega provides the initial K; only
+    solver: alternating # alternating | droidcalib_schur
+    # Omega provides the initial K; only
     # fx/fy are updated with a fixed ratio while cx/cy remain fixed.
     warmup_keyframes: 20
     every_n_ba: 8

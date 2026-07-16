@@ -1,0 +1,6 @@
+inherit_from: ./configs/Experiments/bonn_crowd2_omega_focal_ba_smoke.yaml
+scene: bonn_crowd2_omega_droidcalib_schur_smoke
+tracking:
+  focal_calibration:
+    solver: droidcalib_schur
+    prior_weight: 5.0

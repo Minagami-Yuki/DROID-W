@@ -1,0 +1,10 @@
+inherit_from: ./configs/Experiments/bonn_crowd2_omega_focal_ba_final.yaml
+scene: bonn_crowd2_omega_droidcalib_schur_prior5
+
+# Omega initializes the shared camera calibration. The constrained Schur BA
+# retains the focal ratio and uses a weak focal prior in every joint solve.
+tracking:
+  focal_calibration:
+    enable: True
+    solver: droidcalib_schur
+    prior_weight: 5.0
