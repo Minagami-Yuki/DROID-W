@@ -1,0 +1,17 @@
+inherit_from: ./configs/Dynamic/Bonn/bonn_moving_nonobstructing_box_omega_patch_token_uncertainty_v25_calib_mismatch_active_only.yaml
+scene: bonn_moving_nonobstructing_box_omega_droidcalib_schur_h100
+setup_seed: 43
+cam:
+  fx: 589.108093
+  fy: 585.238647
+  cx: 320.0
+  cy: 240.0
+tracking:
+  uncertainty_params:
+    visualize: False
+  focal_calibration:
+    enable: True
+    solver: droidcalib_schur
+    prior_weight: 5.0
+    schur_diagnostics: True
+    schur_min_hessian: 100.0
