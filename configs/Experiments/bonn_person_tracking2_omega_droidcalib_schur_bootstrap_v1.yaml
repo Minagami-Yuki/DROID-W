@@ -1,0 +1,13 @@
+inherit_from: ./configs/Experiments/bonn_person_tracking2_omega_droidcalib_schur_h100.yaml
+scene: bonn_person_tracking2_omega_droidcalib_schur_bootstrap_v1
+
+tracking:
+  focal_calibration:
+    schur_bootstrap:
+      enable: True
+      start_keyframes: 30
+      end_keyframes: 80
+      every_n_ba: 1
+      min_hessian: 25.0
+      max_log_step: 0.004
+      max_log_deviation: 0.10
