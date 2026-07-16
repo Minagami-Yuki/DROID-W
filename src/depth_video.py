@@ -15,6 +15,7 @@ from src.utils.dyn_uncertainty import mapping_utils as map_utils
 from src.utils.plot_utils import create_gif_from_directory
 from src.utils.omega_prior import OmegaPriorCache
 from src.utils.edge_dtf_prior import EdgeDTFPrior
+from src.utils.v46_reliability import apply_v46_reliability
 import matplotlib.pyplot as plt
 import os
 import csv
@@ -48,6 +49,7 @@ class DepthVideo:
         self._focal_prior = None
         self._focal_ratio = None
         self._focal_ba_calls = 0
+        self._focal_stable_ba_streak = 0
         self._focal_calibration_rows = []
         self.omega_prior = OmegaPriorCache(cfg, self.device)
         self.edge_dtf_prior = EdgeDTFPrior(cfg, self.device)
@@ -481,6 +483,17 @@ class DepthVideo:
             if self.omega_prior.uncertainty_enabled and self.omega_prior.uncertainty_cfg.get("freeze_droid_uncertainty_update", False):
                 enable_update_uncer = False
 
+            solver = self.focal_calibration_cfg.get("solver", "alternating")
+            bootstrap_cfg = self.focal_calibration_cfg.get("schur_bootstrap", {}) or {}
+            stability_cfg = bootstrap_cfg.get("trajectory_stability", {}) or {}
+            record_base_pose_update = (
+                solver in {"droidcalib_schur", "flow3r_schur"}
+                and self.focal_calibration_enabled
+                and bool(stability_cfg.get("enable", False))
+                and not motion_only
+            )
+            poses_before_base_ba = self.poses[:self.counter.value].clone() if record_base_pose_update else None
+
             # if there is NaN of inf value for self.affine_weights, assert
             if self.uncertainty_aware:
                 assert not torch.isnan(self.affine_weights).any(), "self.affine_weights has NaN value"
@@ -517,13 +530,17 @@ class DepthVideo:
                     self.debug)          # t0, t1: window of keyframes for BA
             
             self.disps.clamp_(min=1e-5)
-            solver = self.focal_calibration_cfg.get("solver", "alternating")
+            base_pose_update = self._focal_base_pose_update(poses_before_base_ba, t0, t1)
             if solver in {"droidcalib_schur", "flow3r_schur"}:
-                self._maybe_flow3r_focal_schur(target, weight, eta, ii, jj, t0, t1, motion_only)
+                self._maybe_flow3r_focal_schur(
+                    target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update
+                )
             else:
                 self._maybe_calibrate_focal(target, weight, ii, jj, motion_only)
 
-    def _maybe_flow3r_focal_schur(self, target, weight, eta, ii, jj, t0, t1, motion_only):
+    def _maybe_flow3r_focal_schur(
+        self, target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update=None
+    ):
         from src.utils.flow3r_joint_ba import load_flow3r_joint_backend
 
         cfg = self.focal_calibration_cfg
@@ -536,6 +553,34 @@ class DepthVideo:
             and int(bootstrap_cfg.get("start_keyframes", 30)) <= self.counter.value
             and self.counter.value <= int(bootstrap_cfg.get("end_keyframes", 80))
         )
+        recovery_cfg = bootstrap_cfg.get("initial_k_recovery", {}) or {}
+        initial_focal_px = float(self._focal_prior[0]) * float(self.down_scale)
+        recovery_active = (
+            bootstrap_active
+            and bool(recovery_cfg.get("enable", False))
+            and initial_focal_px >= float(recovery_cfg.get("focal_min_px", float("inf")))
+            and initial_focal_px <= float(recovery_cfg.get("focal_max_px", float("inf")))
+        )
+        stability_cfg = bootstrap_cfg.get("trajectory_stability", {}) or {}
+        stability_enabled = (
+            bootstrap_active
+            and bool(stability_cfg.get("enable", False))
+            and not recovery_active
+        )
+        stability_ok = True
+        if stability_enabled:
+            max_translation = float(stability_cfg.get("max_translation_update", 0.03))
+            max_rotation = float(stability_cfg.get("max_rotation_update_rad", 0.025))
+            stability_ok = (
+                base_pose_update is not None
+                and base_pose_update["finite"]
+                and base_pose_update["translation_max"] <= max_translation
+                and base_pose_update["rotation_max"] <= max_rotation
+            )
+            if stability_ok:
+                self._focal_stable_ba_streak += 1
+            else:
+                self._focal_stable_ba_streak = 0
         every_n_ba = int(
             bootstrap_cfg.get("every_n_ba", 1) if bootstrap_active else cfg.get("every_n_ba", 8)
         )
@@ -562,7 +607,7 @@ class DepthVideo:
             final_relative = torch.log((self.intrinsics[0, 0] / self._focal_prior[0]).clamp_min(1e-6))
             self._focal_calibration_rows.append({
                 "solver": "droidcalib_schur",
-                "phase": "bootstrap" if bootstrap_active else "tracking",
+                "phase": "recovery" if recovery_active else ("bootstrap" if bootstrap_active else "tracking"),
                 "ba_call": self._focal_ba_calls,
                 "keyframes": self.counter.value,
                 "fx_before": float(intrinsics_before[0]),
@@ -580,10 +625,22 @@ class DepthVideo:
                 "gradient": float(gradient),
                 "hessian": float(hessian),
                 "hessian_threshold": "" if min_hessian is None else float(min_hessian),
+                "initial_focal_px": initial_focal_px,
+                "initial_k_recovery": int(recovery_active),
+                "base_pose_translation_max": "" if base_pose_update is None else base_pose_update["translation_max"],
+                "base_pose_rotation_max": "" if base_pose_update is None else base_pose_update["rotation_max"],
+                "stable_ba_streak": self._focal_stable_ba_streak if stability_enabled else "",
                 "accepted": int(accepted),
                 "reason": reason,
             })
             self._write_focal_calibration_rows()
+
+        if stability_enabled and (
+            not stability_ok
+            or self._focal_stable_ba_streak < int(stability_cfg.get("min_consecutive_ba", 3))
+        ):
+            write_row("unstable_trajectory", False, intrinsics_before[0], intrinsics_before[1], 0.0, loss_before)
+            return
 
         if min_hessian is not None and (
             not torch.isfinite(hessian) or float(hessian) < float(min_hessian)
@@ -642,6 +699,32 @@ class DepthVideo:
             return
         self.intrinsics[:self.counter.value, :2] = self.intrinsics[0, :2]
         write_row("accepted", True, fx_proposed, fy_proposed, step_proposed, loss_after)
+        if stability_enabled and bool(stability_cfg.get("reset_after_accept", True)):
+            self._focal_stable_ba_streak = 0
+
+    def _focal_base_pose_update(self, poses_before, t0, t1):
+        """Summarize the ordinary BA pose change before allowing a focal update."""
+        if poses_before is None:
+            return None
+        count = min(self.counter.value, poses_before.shape[0])
+        start = max(0, min(int(t0), count))
+        end = min(count, int(t1) if t1 is not None else count)
+        if end <= start:
+            return {"translation_max": float("inf"), "rotation_max": float("inf"), "finite": False}
+
+        before = poses_before[start:end]
+        after = self.poses[start:end]
+        translation = torch.linalg.vector_norm(after[:, :3] - before[:, :3], dim=-1)
+        before_q = F.normalize(before[:, 3:7], dim=-1)
+        after_q = F.normalize(after[:, 3:7], dim=-1)
+        cosine = (before_q * after_q).sum(dim=-1).abs().clamp(0.0, 1.0)
+        rotation = 2.0 * torch.acos(cosine)
+        finite = bool(torch.isfinite(translation).all() and torch.isfinite(rotation).all())
+        return {
+            "translation_max": float(translation.max()) if translation.numel() else float("inf"),
+            "rotation_max": float(rotation.max()) if rotation.numel() else float("inf"),
+            "finite": finite,
+        }
 
     def _focal_schur_observability(self, target, weight, ii, jj, intrinsics, compute_derivatives):
         """Measure focal information in the post-gating reprojection objective."""
@@ -831,7 +914,7 @@ class DepthVideo:
         )
         return (weight * edge_weight[:, None]).contiguous()
 
-    def edge_dtf_weight_from_coords(self, ii, jj, coords):
+    def edge_dtf_weight_from_coords(self, ii, jj, coords, graph_metadata=None):
         if not self.edge_dtf_prior.enabled:
             return torch.ones_like(coords[..., :1])
 
@@ -855,6 +938,7 @@ class DepthVideo:
             source_edge,
             residual_dtf,
             edge_weight,
+            graph_metadata=graph_metadata,
         )
         edge_weight = edge_weight * self.edge_dtf_per_edge_covariance(
             ii,
@@ -1000,7 +1084,9 @@ class DepthVideo:
             max=float(spatial_cfg.get("max_scale", 1.0)),
         )
 
-    def edge_dtf_patch_token_uncertainty(self, ii, jj, coords, valid_mask, source_edge, residual_dtf, reference):
+    def edge_dtf_patch_token_uncertainty(
+        self, ii, jj, coords, valid_mask, source_edge, residual_dtf, reference, graph_metadata=None
+    ):
         patch_cfg = self.edge_dtf_prior.cfg.get("patch_token_uncertainty", {}) or {}
         if not bool(patch_cfg.get("enable", False)):
             return torch.ones_like(reference)
@@ -1885,6 +1971,38 @@ class DepthVideo:
                 )
                 scale = torch.clamp(scale * dense_scale, min=0.0, max=1.0)
 
+        v46_cfg = patch_cfg.get("v46_reliability", {}) or {}
+        v46_debug = None
+        if bool(v46_cfg.get("enable", False)):
+            temporal_cfg = v46_cfg.get("temporal", {}) or {}
+            prior_risk = None
+            prior_valid = None
+            if bool(temporal_cfg.get("enable", False)):
+                prior_valid = self.omega_dense_patch_valid[ii].view(-1, 1, 1).expand_as(risk)
+                prior_risk = self.omega_dense_patch_risk[ii]
+
+            scale, v46_debug = apply_v46_reliability(
+                scale=scale,
+                risk=risk,
+                edge_residual=torch.clamp(source_edge * residual_dtf, 0.0, 1.0),
+                valid=valid_pixel,
+                cfg=v46_cfg,
+                graph_metadata=graph_metadata,
+                prior_risk=prior_risk,
+                prior_valid=prior_valid,
+            )
+
+            if bool(temporal_cfg.get("enable", False)) and not bool(dense_cfg.get("enable", False)):
+                self._update_dense_patch_token_uncertainty_map(
+                    {
+                        "ema": temporal_cfg.get("ema", 0.80),
+                        "save_visuals": False,
+                    },
+                    ii,
+                    valid_pixel,
+                    risk,
+                )
+
         self._write_patch_token_uncertainty_stats(
             patch_cfg,
             ii,
@@ -1902,6 +2020,7 @@ class DepthVideo:
             dense_temporal_debug,
             remap_debug,
             low_parallax_debug,
+            v46_debug,
         )
         return scale
 
@@ -1989,6 +2108,7 @@ class DepthVideo:
         dense_temporal_debug=None,
         remap_debug=None,
         low_parallax_debug=None,
+        v46_debug=None,
     ):
         stats_cfg = patch_cfg.get("debug_stats", {}) or {}
         if not bool(stats_cfg.get("enable", False)):
@@ -2033,6 +2153,9 @@ class DepthVideo:
         if low_parallax_debug is not None:
             for name, tensor in low_parallax_debug.items():
                 values[f"low_parallax_{name}"] = tensor[:count].detach().float()
+        if v46_debug is not None:
+            for name, tensor in v46_debug.items():
+                values[f"v46_{name}"] = tensor[:count].detach().float()
 
         mask = valid_pixel[:count].detach().bool()
         flat_mask = mask.reshape(count, -1)
@@ -2152,6 +2275,36 @@ class DepthVideo:
                 row["low_parallax_active_coverage"] = ""
                 row["low_parallax_distance"] = ""
                 row["low_parallax_residual_mean"] = ""
+            if v46_debug is not None:
+                for name in (
+                    "prior_score",
+                    "geometry_score",
+                    "agreement",
+                    "temporal_score",
+                    "observability",
+                    "endpoint_degree",
+                    "reverse_support",
+                    "edge_span",
+                    "budget_multiplier",
+                    "candidate_scale",
+                    "output_scale",
+                ):
+                    row[f"v46_{name}_mean"] = float(masked_mean(f"v46_{name}")[k].cpu())
+            else:
+                for name in (
+                    "prior_score",
+                    "geometry_score",
+                    "agreement",
+                    "temporal_score",
+                    "observability",
+                    "endpoint_degree",
+                    "reverse_support",
+                    "edge_span",
+                    "budget_multiplier",
+                    "candidate_scale",
+                    "output_scale",
+                ):
+                    row[f"v46_{name}_mean"] = ""
             rows.append(row)
 
         fieldnames = [
@@ -2199,6 +2352,17 @@ class DepthVideo:
             "low_parallax_active_coverage",
             "low_parallax_distance",
             "low_parallax_residual_mean",
+            "v46_prior_score_mean",
+            "v46_geometry_score_mean",
+            "v46_agreement_mean",
+            "v46_temporal_score_mean",
+            "v46_observability_mean",
+            "v46_endpoint_degree_mean",
+            "v46_reverse_support_mean",
+            "v46_edge_span_mean",
+            "v46_budget_multiplier_mean",
+            "v46_candidate_scale_mean",
+            "v46_output_scale_mean",
         ]
         file_exists = os.path.exists(out_path)
         with open(out_path, "a", newline="") as f:

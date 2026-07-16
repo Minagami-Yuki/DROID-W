@@ -1,0 +1,12 @@
+inherit_from: ./configs/Experiments/bonn_crowd_omega_droidcalib_schur_bootstrap_v1.yaml
+scene: bonn_crowd_omega_droidcalib_schur_stability_v2
+
+tracking:
+  focal_calibration:
+    schur_bootstrap:
+      trajectory_stability:
+        enable: True
+        max_translation_update: 0.020
+        max_rotation_update_rad: 0.0125
+        min_consecutive_ba: 3
+        reset_after_accept: True

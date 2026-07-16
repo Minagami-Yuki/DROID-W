@@ -1,0 +1,11 @@
+inherit_from: ./configs/Experiments/bonn_moving_nonobstructing_box2_omega_droidcalib_schur_stability_v2.yaml
+scene: bonn_moving_nonobstructing_box2_omega_droidcalib_schur_k_branch_v2
+
+tracking:
+  focal_calibration:
+    schur_bootstrap:
+      initial_k_recovery:
+        enable: True
+        # The tracker resizes Bonn inputs to 80% of their configured focal length.
+        focal_min_px: 456.0
+        focal_max_px: 520.0

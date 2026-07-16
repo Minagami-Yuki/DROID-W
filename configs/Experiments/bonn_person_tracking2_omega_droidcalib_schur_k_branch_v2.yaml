@@ -1,0 +1,10 @@
+inherit_from: ./configs/Experiments/bonn_person_tracking2_omega_droidcalib_schur_stability_v2.yaml
+scene: bonn_person_tracking2_omega_droidcalib_schur_k_branch_v2
+
+tracking:
+  focal_calibration:
+    schur_bootstrap:
+      initial_k_recovery:
+        enable: True
+        focal_min_px: 456.0
+        focal_max_px: 520.0
