@@ -15,8 +15,8 @@ PYTHON = Path("/home/czy/anaconda3/envs/droid-w/bin/python")
 OUTPUT_ROOT = Path("/data1/czy/Output/DROID-omega/Bonn")
 
 
-def complete(scene: str) -> bool:
-    traj = OUTPUT_ROOT / scene / "traj"
+def complete(scene: str, output_root: Path = OUTPUT_ROOT) -> bool:
+    traj = output_root / scene / "traj"
     return (traj / "metrics_full_traj.txt").is_file() and (traj / "metrics_kf_traj.txt").is_file()
 
 
@@ -27,32 +27,44 @@ def main() -> int:
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     parser.add_argument("--log", type=Path)
+    parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--max-retries", type=int, default=20)
+    parser.add_argument("--retry-seconds", type=float, default=30.0)
     args = parser.parse_args()
 
-    if complete(args.scene):
+    if complete(args.scene, args.output_root):
         print(f"ATE already complete: {args.scene}")
         return 0
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = args.gpu
+    # "default" preserves the CUDA visibility of the parent process.  This
+    # is needed on managed nodes where remapping via CUDA_VISIBLE_DEVICES can
+    # make an otherwise usable default GPU disappear.
+    if args.gpu == "default":
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = args.gpu
     log_path = args.log or ROOT / "Outputs" / "tracking_logs" / f"{args.scene}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            [str(PYTHON), "run.py", "--config", str(args.config)],
-            cwd=ROOT,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        while process.poll() is None and not complete(args.scene):
-            time.sleep(args.poll_seconds)
-        if complete(args.scene):
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=30)
-            print(f"ATE complete: {args.scene}")
-            return 0
-        raise RuntimeError(f"Tracking exited with status {process.returncode} before both ATE files were written; log: {log_path}")
+    for attempt in range(1, args.max_retries + 1):
+        mode = "w" if attempt == 1 else "a"
+        with log_path.open(mode, encoding="utf-8") as log:
+            if attempt > 1:
+                log.write(f"\n[retry {attempt}/{args.max_retries}]\n")
+            process = subprocess.Popen(
+                [str(PYTHON), "run.py", "--config", str(args.config)],
+                cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
+            )
+            while process.poll() is None and not complete(args.scene, args.output_root):
+                time.sleep(args.poll_seconds)
+            if complete(args.scene, args.output_root):
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=30)
+                print(f"ATE complete: {args.scene}")
+                return 0
+        if attempt < args.max_retries:
+            time.sleep(args.retry_seconds)
+    raise RuntimeError(f"Tracking exited before both ATE files were written after {args.max_retries} attempts; log: {log_path}")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from src.tracker import Tracker
 from src.mapper import Mapper
 from src.backend import Backend
 from src.utils.datasets import RGB_NoPose
-from src.gui import gui_utils, slam_gui
+from src.gui import gui_utils
 from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
 from torch.utils.tensorboard import SummaryWriter
 from src.utils.sys_timer import timer
@@ -305,6 +305,10 @@ class SLAM:
             p.start()
 
         if self.cfg['gui']:
+            # Keep the OpenGL renderer out of headless tracking processes.
+            # Importing it eagerly makes a GUI-disabled evaluation fail when
+            # CUDA visibility is transient during process startup.
+            from src.gui import slam_gui
             time.sleep(5)
             pipeline_params = munchify(self.cfg["mapping"]["pipeline_params"])
             bg_color = [0, 0, 0]
