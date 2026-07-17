@@ -1,0 +1,36 @@
+# Frozen unknown-intrinsics tracking preset.
+# This overlay is consumed by scripts_eval/run_droidw_unknownk_confidence_compare.py.
+tracking:
+  focal_calibration:
+    enable: True
+    solver: droidcalib_schur
+    intrinsics_mode: focal
+    prior_weight: 5.0
+    warmup_keyframes: 20
+    every_n_ba: 8
+    use_reliable_weights: True
+    min_edges: 12
+    max_log_step: 0.002
+    max_log_deviation: 0.15
+    schur_diagnostics: True
+    schur_min_hessian: 100.0
+    schur_bootstrap:
+      enable: True
+      start_keyframes: 30
+      end_keyframes: 80
+      every_n_ba: 1
+      min_hessian: 25.0
+      max_log_step: 0.004
+      max_log_deviation: 0.10
+      trajectory_stability:
+        enable: True
+        max_translation_update: 0.020
+        max_rotation_update: 0.0125
+        min_consecutive_stable: 3
+        reset_on_instability: True
+      initial_k_recovery:
+        enable: False
+      omega_confidence_recovery:
+        enable: True
+        min_samples: 30
+        min_mean_median_ratio: 1.05

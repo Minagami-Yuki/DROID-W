@@ -9,6 +9,9 @@ save_gt_poses: True
 droidvis: False
 debug: False
 
+runtime:
+  deterministic_eval: False # error on known non-deterministic PyTorch CUDA operations
+
 traj_filler:
   use_dino_features: False
 
@@ -82,10 +85,30 @@ tracking:
   focal_calibration:
     enable: False
     solver: alternating # alternating | droidcalib_schur
-    # Omega provides the initial K; only
-    # fx/fy are updated with a fixed ratio while cx/cy remain fixed.
+    intrinsics_mode: focal # focal | full_pinhole (fx, fy, cx, cy)
+    # Omega provides the initial K.  Focal mode updates fx/fy with a fixed
+    # ratio; full_pinhole additionally updates cx/cy as one shared camera.
     warmup_keyframes: 20
     every_n_ba: 8
+    # Optional scene-global calibration freeze.  Null keeps the original
+    # continuously-adaptive behavior; a positive value freezes only K.
+    freeze_after_keyframes: null
+    # Optional K-only observation subset for the joint intrinsics Schur solve.
+    # It never changes the ordinary pose/depth BA weights or graph.
+    calibration_observation:
+      enable: False
+      mode: hard # hard (mask) | soft (continuous reweighting)
+      min_keyframe_span: 4
+      require_omega_uncertainty: True
+      omega_max_uncertainty: 0.93
+      use_dense_patch_risk: False
+      max_dense_patch_risk: 0.25
+      soft_omega_certain: 0.85
+      soft_omega_uncertain: 1.00
+      soft_min_pixel_scale: 0.60
+      soft_span_start: 1.0
+      soft_span_full: 4.0
+      soft_min_edge_scale: 0.75
     use_reliable_weights: True
     min_edges: 12
     min_weighted_pixels: 1024.0
@@ -95,6 +118,13 @@ tracking:
     max_log_step: 0.002
     max_log_deviation: 0.15
     max_loss_increase: 0.0
+    principal_point:
+      enable: False
+      # Limits are in the tracker-resolution coordinates used by DepthVideo.
+      max_step: 0.10
+      max_deviation: 1.50
+      prior_weight: 0.05
+      min_hessian: 0.001
     schur_diagnostics: False
     schur_min_hessian: null # disabled unless a positive focal-information threshold is specified
     schur_bootstrap:
@@ -115,6 +145,10 @@ tracking:
         enable: False
         focal_min_px: .inf
         focal_max_px: .inf
+      omega_confidence_recovery:
+        enable: False
+        min_samples: 30
+        min_mean_median_ratio: .inf
   pretrained: /home/czy/FanZhu/DROID-Splat/pretrained/droid.pth
   buffer: 350     # maximum number of keyframes that can be stored
   beta: 0.75      # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel
@@ -439,6 +473,36 @@ edge_dtf_prior:
         min_mean_alpha: 0.006
         max_mean_alpha: 0.016
         mode: smoothstep # smoothstep | linear
+    v46_reliability:
+      enable: False
+      min_scale: 0.97
+      agreement:
+        enable: True
+        risk_low_quantile: 0.50
+        risk_high_quantile: 0.85
+        residual_low_quantile: 0.50
+        residual_high_quantile: 0.85
+        power: 1.0
+        floor: 0.0
+      temporal:
+        enable: False
+        ema: 0.80
+        risk_low_quantile: 0.50
+        risk_high_quantile: 0.85
+        first_observation_score: 0.35
+        floor: 0.25
+      observability:
+        enable: False
+        min_endpoint_degree: 2.0
+        full_endpoint_degree: 5.0
+        no_reverse_floor: 0.35
+        protect_long_span: True
+        span_protect_start: 4.0
+        span_protect_full: 12.0
+        long_span_min_scale: 0.25
+      information_budget:
+        enable: False
+        max_mean_suppression: 0.003
     conditional_gate:
       enable: False
       mode: multiply # multiply | hard

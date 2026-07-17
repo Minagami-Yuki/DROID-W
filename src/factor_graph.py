@@ -4,6 +4,7 @@ import numpy as np
 from src.modules.droid_net import CorrBlock, AltCorrBlock
 import src.geom.projective_ops as pops
 from copy import deepcopy
+from src.utils.v46_reliability import graph_observability_metadata
 
 
 class FactorGraph:
@@ -151,7 +152,22 @@ class FactorGraph:
         with torch.amp.autocast('cuda', enabled=False):
             target, _ = self.video.reproject(ii, jj)
             weight = torch.zeros_like(target)
-            edge_dtf_weight = self.video.edge_dtf_weight_from_coords(ii, jj, target)
+            existing_ii = self.ii if self.ii is not None else ii.new_empty((0,))
+            existing_jj = self.jj if self.jj is not None else jj.new_empty((0,))
+            graph_ii = torch.cat([existing_ii, ii], dim=0)
+            graph_jj = torch.cat([existing_jj, jj], dim=0)
+            graph_metadata = graph_observability_metadata(
+                ii,
+                jj,
+                graph_ii,
+                graph_jj,
+            )
+            edge_dtf_weight = self.video.edge_dtf_weight_from_coords(
+                ii,
+                jj,
+                target,
+                graph_metadata=graph_metadata,
+            )
 
         self.ii = torch.cat([self.ii, ii], 0)
         self.jj = torch.cat([self.jj, jj], 0)

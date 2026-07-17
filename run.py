@@ -11,12 +11,17 @@ from colorama import Fore,Style
 from torch.utils.tensorboard import SummaryWriter
 
 import random
-def setup_seed(seed):
+def setup_seed(seed, deterministic_eval=False):
+    if deterministic_eval:
+        # CUBLAS_WORKSPACE_CONFIG must be set before the first CUDA operation.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -26,7 +31,10 @@ if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
 
     cfg = config.load_config(args.config)
-    setup_seed(cfg['setup_seed'])
+    setup_seed(
+        cfg['setup_seed'],
+        deterministic_eval=bool((cfg.get('runtime', {}) or {}).get('deterministic_eval', False)),
+    )
     if cfg['fast_mode']:
         # Force the final refine iterations to be 3000 if in fast mode
         cfg['mapping']['final_refine_iters'] = 3000
@@ -58,4 +66,3 @@ if __name__ == '__main__':
 
     end_time = strftime("%Y-%m-%d %H:%M:%S", gmtime())
     print("-"*30+Fore.LIGHTRED_EX+f"\nWildGS-SLAM finishes!\n"+Style.RESET_ALL+f"{end_time}\n"+"-"*30)
-

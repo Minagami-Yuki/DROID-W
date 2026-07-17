@@ -48,6 +48,7 @@ class DepthVideo:
         self.focal_calibration_enabled = bool(self.focal_calibration_cfg.get('enable', False))
         self._focal_prior = None
         self._focal_ratio = None
+        self._intrinsics_prior = None
         self._focal_ba_calls = 0
         self._focal_stable_ba_streak = 0
         self._focal_confidence_shape_scores = []
@@ -208,11 +209,15 @@ class DepthVideo:
                 if self._focal_prior is None:
                     self._focal_prior = intrinsic[:2].detach().clone()
                     self._focal_ratio = (intrinsic[1] / intrinsic[0]).detach().clone()
+                    self._intrinsics_prior = intrinsic.detach().clone().to(self.device)
                 else:
-                    # The sequence shares one camera. New keyframes must use the
-                    # current calibrated focal, not the original dataset input.
+                    # The sequence shares one camera. New keyframes must use
+                    # the current calibrated K, not the original dataset input.
                     intrinsic = intrinsic.clone()
-                    intrinsic[..., :2] = self.intrinsics[0, :2]
+                    if self.focal_calibration_cfg.get("intrinsics_mode", "focal") == "full_pinhole":
+                        intrinsic[...] = self.intrinsics[0]
+                    else:
+                        intrinsic[..., :2] = self.intrinsics[0, :2]
             self.intrinsics[index] = intrinsic
 
         if len(item) > 6 and item[6] is not None:
@@ -541,9 +546,14 @@ class DepthVideo:
             self.disps.clamp_(min=1e-5)
             base_pose_update = self._focal_base_pose_update(poses_before_base_ba, t0, t1)
             if solver in {"droidcalib_schur", "flow3r_schur"}:
-                self._maybe_flow3r_focal_schur(
-                    target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update
-                )
+                if self.focal_calibration_cfg.get("intrinsics_mode", "focal") == "full_pinhole":
+                    self._maybe_flow3r_full_pinhole_schur(
+                        target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update
+                    )
+                else:
+                    self._maybe_flow3r_focal_schur(
+                        target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update
+                    )
             else:
                 self._maybe_calibrate_focal(target, weight, ii, jj, motion_only)
 
@@ -682,7 +692,7 @@ class DepthVideo:
             ii, jj, t0, t1, 1, 2, 1e-4, 0.1, False, True,
             float(self._focal_prior[0]),
             float(cfg.get("prior_weight", 5.0)) / float(self._focal_prior[0].square().clamp_min(1e-6)),
-            1.0,
+            1.0, self._intrinsics_prior, torch.zeros_like(self._intrinsics_prior),
         )
         max_deviation = float(
             bootstrap_cfg.get("max_log_deviation", cfg.get("max_log_deviation", 0.15))
@@ -713,7 +723,7 @@ class DepthVideo:
                 ii, jj, t0, t1, 1, 2, 1e-4, 0.1, False, True,
                 float(self._focal_prior[0]),
                 float(cfg.get("prior_weight", 5.0)) / float(self._focal_prior[0].square().clamp_min(1e-6)),
-                scale,
+                scale, self._intrinsics_prior, torch.zeros_like(self._intrinsics_prior),
             )
         with torch.no_grad():
             loss_after, _ = self._focal_data_loss(target, weight, ii, jj, self.intrinsics[0])
@@ -727,6 +737,325 @@ class DepthVideo:
         write_row("accepted", True, fx_proposed, fy_proposed, step_proposed, loss_after)
         if stability_enabled and bool(stability_cfg.get("reset_after_accept", True)):
             self._focal_stable_ba_streak = 0
+
+    def _maybe_flow3r_full_pinhole_schur(
+        self, target, weight, eta, ii, jj, t0, t1, motion_only, base_pose_update=None
+    ):
+        """Constrained four-parameter pinhole Schur update.
+
+        The CUDA backend already supports model_id=0 (fx, fy, cx, cy).  This
+        wrapper keeps that larger update inside the existing acceptance path by
+        applying per-component trust regions and a prior-aware loss check.
+        """
+        from src.utils.flow3r_joint_ba import load_flow3r_joint_backend
+
+        cfg = self.focal_calibration_cfg
+        if (
+            not self.focal_calibration_enabled
+            or motion_only
+            or self._intrinsics_prior is None
+        ):
+            return
+        # Intrinsics are scene-global.  In dynamic sequences, allowing this
+        # block to keep adapting after the early well-observed segment can
+        # couple late moving-object residuals back into the shared camera.
+        # The optional freeze keeps ordinary pose/depth BA active.
+        freeze_after = cfg.get("freeze_after_keyframes")
+        if freeze_after is not None and self.counter.value > int(freeze_after):
+            return
+        self._focal_ba_calls += 1
+        bootstrap_cfg = cfg.get("schur_bootstrap", {}) or {}
+        bootstrap_active = (
+            bool(bootstrap_cfg.get("enable", False))
+            and int(bootstrap_cfg.get("start_keyframes", 30)) <= self.counter.value
+            and self.counter.value <= int(bootstrap_cfg.get("end_keyframes", 80))
+        )
+        confidence_cfg = bootstrap_cfg.get("omega_confidence_recovery", {}) or {}
+        confidence_score = (
+            float(np.median(self._focal_confidence_shape_scores))
+            if self._focal_confidence_shape_scores
+            else float("nan")
+        )
+        confidence_active = (
+            bootstrap_active
+            and bool(confidence_cfg.get("enable", False))
+            and len(self._focal_confidence_shape_scores) >= int(confidence_cfg.get("min_samples", 30))
+            and np.isfinite(confidence_score)
+            and confidence_score >= float(confidence_cfg.get("min_mean_median_ratio", float("inf")))
+        )
+        stability_cfg = bootstrap_cfg.get("trajectory_stability", {}) or {}
+        stability_enabled = (
+            bootstrap_active
+            and bool(stability_cfg.get("enable", False))
+            and not confidence_active
+        )
+        stability_ok = True
+        if stability_enabled:
+            stability_ok = (
+                base_pose_update is not None
+                and base_pose_update["finite"]
+                and base_pose_update["translation_max"] <= float(stability_cfg.get("max_translation_update", 0.03))
+                and base_pose_update["rotation_max"] <= float(stability_cfg.get("max_rotation_update_rad", 0.025))
+            )
+            self._focal_stable_ba_streak = self._focal_stable_ba_streak + 1 if stability_ok else 0
+
+        every_n_ba = int(bootstrap_cfg.get("every_n_ba", 1) if bootstrap_active else cfg.get("every_n_ba", 8))
+        if self._focal_ba_calls % max(1, every_n_ba) != 0:
+            return
+        if self.counter.value < int(cfg.get("warmup_keyframes", 20)) or int((ii != jj).sum()) < int(cfg.get("min_edges", 12)):
+            return
+
+        before = self.intrinsics[0].clone()
+        diagnostic_enabled = bool(cfg.get("schur_diagnostics", False))
+        calibration_weight, calibration_observation = self._calibration_observation_weights(
+            weight, ii, jj
+        )
+        loss_before, support, hessian_diag = self._full_intrinsics_observability(
+            target, calibration_weight, ii, jj, before
+        )
+        pp_cfg = cfg.get("principal_point", {}) or {}
+        # Model-id 0 uses independent fx/fy/cx/cy coordinates, so its
+        # curvature scale is not comparable to the focal-only scalar model.
+        focal_min_hessian = float(cfg.get("full_focal_min_hessian", 1.0))
+        principal_min_hessian = float(pp_cfg.get("min_hessian", 0.0))
+
+        def write_row(reason, accepted, proposed, loss_after):
+            if not diagnostic_enabled:
+                return
+            self._focal_calibration_rows.append({
+                "solver": "droidcalib_schur_full_pinhole",
+                "phase": "confidence_recovery" if confidence_active else ("bootstrap" if bootstrap_active else "tracking"),
+                "ba_call": self._focal_ba_calls,
+                "keyframes": self.counter.value,
+                "fx_before": float(before[0]), "fy_before": float(before[1]),
+                "cx_before": float(before[2]), "cy_before": float(before[3]),
+                "fx_proposed": float(proposed[0]), "fy_proposed": float(proposed[1]),
+                "cx_proposed": float(proposed[2]), "cy_proposed": float(proposed[3]),
+                "fx_after": float(self.intrinsics[0, 0]), "fy_after": float(self.intrinsics[0, 1]),
+                "cx_after": float(self.intrinsics[0, 2]), "cy_after": float(self.intrinsics[0, 3]),
+                "loss_before": float(loss_before), "loss_after": float(loss_after),
+                "support": float(support),
+                "calibration_observation_coverage": calibration_observation["coverage"],
+                "calibration_observation_retained_edges": calibration_observation["retained_edges"],
+                "calibration_observation_total_edges": calibration_observation["total_edges"],
+                "hessian_diag": ";".join(f"{float(value):.6g}" for value in hessian_diag),
+                "omega_confidence_shape_score": confidence_score,
+                "omega_confidence_recovery": int(confidence_active),
+                "base_pose_translation_max": "" if base_pose_update is None else base_pose_update["translation_max"],
+                "base_pose_rotation_max": "" if base_pose_update is None else base_pose_update["rotation_max"],
+                "stable_ba_streak": self._focal_stable_ba_streak if stability_enabled else "",
+                "accepted": int(accepted), "reason": reason,
+            })
+            self._write_focal_calibration_rows()
+
+        if stability_enabled and (
+            not stability_ok or self._focal_stable_ba_streak < int(stability_cfg.get("min_consecutive_ba", 3))
+        ):
+            write_row("unstable_trajectory", False, before, loss_before)
+            return
+        if (
+            not torch.isfinite(hessian_diag).all()
+            or float(hessian_diag[:2].abs().min()) < focal_min_hessian
+            or float(hessian_diag[2:].abs().min()) < principal_min_hessian
+        ):
+            write_row("low_observability", False, before, loss_before)
+            return
+
+        backend = load_flow3r_joint_backend()
+        poses_before, disps_before = self.poses.clone(), self.disps.clone()
+        observation_cfg = cfg.get("calibration_observation", {}) or {}
+        # The hard-mask ablation needs state isolation.  Soft calibration
+        # weighting deliberately preserves the joint pose-depth-K coupling.
+        use_observation_subset = (
+            bool(observation_cfg.get("enable", False))
+            and observation_cfg.get("mode", "hard") == "hard"
+        )
+        # The filtered calibration solve proposes K on copies.  This prevents
+        # its restricted factor set from changing the ordinary BA pose/depth
+        # state that the experiment is meant to hold fixed.
+        poses_work = self.poses.clone() if use_observation_subset else self.poses
+        disps_work = self.disps.clone() if use_observation_subset else self.disps
+        intrinsics_work = before.clone() if use_observation_subset else self.intrinsics[0]
+        prior_weight = torch.as_tensor(
+            cfg.get("intrinsics_prior_weight", (0.01, 0.01, 0.005, 0.005)),
+            dtype=self.intrinsics.dtype, device=self.device,
+        ).flatten()
+        if prior_weight.numel() != 4:
+            raise ValueError("full_pinhole intrinsics_prior_weight must contain four values.")
+
+        def solve(scale):
+            backend.flow3r_ba(
+                poses_work, disps_work, intrinsics_work, self.zeros, target, calibration_weight, eta,
+                ii, jj, t0, t1, 1, 0, 1e-4, 0.1, False, True, 0.0, 0.0, scale,
+                self._intrinsics_prior, prior_weight,
+            )
+
+        def reset_work():
+            poses_work.copy_(poses_before)
+            disps_work.copy_(disps_before)
+            intrinsics_work.copy_(before)
+
+        solve(1.0)
+        proposed = intrinsics_work.clone()
+        scale = self._full_intrinsics_update_scale(before, proposed, bootstrap_cfg, pp_cfg)
+        if scale <= 0.0:
+            reset_work()
+            write_row("bounds", False, proposed, loss_before)
+            return
+        if scale < 0.999:
+            reset_work()
+            solve(scale)
+        after = intrinsics_work.clone()
+        if self._full_intrinsics_update_scale(before, after, bootstrap_cfg, pp_cfg) < 0.999:
+            reset_work()
+            write_row("bounds", False, proposed, loss_before)
+            return
+        with torch.no_grad():
+            loss_after, _ = self._full_intrinsics_objective(
+                target, calibration_weight, ii, jj, intrinsics_work
+            )
+        if not torch.isfinite(loss_after) or loss_after > loss_before:
+            reset_work()
+            write_row("loss_increase", False, proposed, loss_after)
+            return
+        if use_observation_subset:
+            self.intrinsics[0].copy_(intrinsics_work)
+        self.intrinsics[:self.counter.value] = self.intrinsics[0]
+        write_row("accepted", True, proposed, loss_after)
+        if stability_enabled and bool(stability_cfg.get("reset_after_accept", True)):
+            self._focal_stable_ba_streak = 0
+
+    def _calibration_observation_weights(self, weight, ii, jj):
+        """Build the K-only observation subset without changing the main BA graph.
+
+        Intrinsics are a shared scene-global variable, while short-baseline or
+        high-uncertainty pixels are often explained equally well by local pose
+        and depth changes.  This mask is used only by the extra joint Schur
+        calibration solve and its acceptance objective; the ordinary DROID BA
+        receives the original weights unchanged.
+        """
+        cfg = self.focal_calibration_cfg.get("calibration_observation", {}) or {}
+        total_edges = int(ii.numel())
+        if not bool(cfg.get("enable", False)):
+            return weight, {
+                "coverage": 1.0,
+                "retained_edges": total_edges,
+                "total_edges": total_edges,
+            }
+
+        mode = cfg.get("mode", "hard")
+        if mode not in {"hard", "soft"}:
+            raise ValueError(
+                "tracking.focal_calibration.calibration_observation.mode must be 'hard' or 'soft'"
+            )
+        edge_span = (ii - jj).abs().float()
+        edge_keep = edge_span >= int(cfg.get("min_keyframe_span", 0))
+        pixel_keep = torch.ones_like(weight[:, 0], dtype=torch.bool)
+        soft_scale = torch.ones_like(weight[:, 0])
+
+        if bool(cfg.get("require_omega_uncertainty", True)):
+            source_valid = self.omega_uncertainty_valid[ii].view(-1, 1, 1)
+            if mode == "hard":
+                max_uncertainty = float(cfg.get("omega_max_uncertainty", 0.93))
+                source_static = self.omega_uncertainties[ii] <= max_uncertainty
+                pixel_keep &= source_valid & source_static
+            else:
+                low = float(cfg.get("soft_omega_certain", 0.85))
+                high = float(cfg.get("soft_omega_uncertain", 1.00))
+                min_scale = float(cfg.get("soft_min_pixel_scale", 0.60))
+                alpha = torch.clamp(
+                    (self.omega_uncertainties[ii] - low) / max(high - low, 1e-6),
+                    0.0,
+                    1.0,
+                )
+                omega_scale = 1.0 - (1.0 - min_scale) * alpha
+                soft_scale *= torch.where(source_valid, omega_scale, torch.ones_like(omega_scale))
+
+        if bool(cfg.get("use_dense_patch_risk", False)):
+            dense_valid = self.omega_dense_patch_valid[ii].view(-1, 1, 1)
+            max_dense_risk = float(cfg.get("max_dense_patch_risk", 0.25))
+            pixel_keep &= dense_valid & (self.omega_dense_patch_risk[ii] <= max_dense_risk)
+
+        if mode == "hard":
+            pixel_keep &= edge_keep.view(-1, 1, 1)
+            calibration_weight = weight * pixel_keep[:, None].to(weight.dtype)
+            retained_edges = int(edge_keep.sum().item())
+        else:
+            span_start = float(cfg.get("soft_span_start", 1.0))
+            span_full = float(cfg.get("soft_span_full", 4.0))
+            min_edge_scale = float(cfg.get("soft_min_edge_scale", 0.75))
+            span_alpha = torch.clamp(
+                (edge_span - span_start) / max(span_full - span_start, 1e-6), 0.0, 1.0
+            )
+            edge_scale = min_edge_scale + (1.0 - min_edge_scale) * span_alpha
+            calibration_weight = weight * (soft_scale * edge_scale.view(-1, 1, 1))[:, None]
+            retained_edges = total_edges
+        total_mass = weight[:, 0].abs().sum().clamp_min(1e-6)
+        retained_mass = calibration_weight[:, 0].abs().sum()
+        return calibration_weight.contiguous(), {
+            "coverage": float((retained_mass / total_mass).detach()),
+            "retained_edges": retained_edges,
+            "total_edges": total_edges,
+        }
+
+    def _full_intrinsics_update_scale(self, before, proposed, bootstrap_cfg, pp_cfg):
+        """Return the largest safe fraction of a backend pinhole update."""
+        prior = self._intrinsics_prior.to(before.device)
+        max_log_step = float(
+            bootstrap_cfg.get("max_log_step", self.focal_calibration_cfg.get("max_log_step", 0.002))
+        )
+        max_log_deviation = float(
+            bootstrap_cfg.get("max_log_deviation", self.focal_calibration_cfg.get("max_log_deviation", 0.15))
+        )
+        max_pp_step = float(pp_cfg.get("max_step", 0.10))
+        max_pp_deviation = float(pp_cfg.get("max_deviation", 1.50))
+        scale = 1.0
+        for index in (0, 1):
+            before_value = torch.log((before[index] / prior[index]).clamp_min(1e-6)).item()
+            proposed_value = torch.log((proposed[index] / prior[index]).clamp_min(1e-6)).item()
+            delta = proposed_value - before_value
+            if not np.isfinite(proposed_value) or abs(delta) > max_log_step:
+                scale = min(scale, max_log_step / max(abs(delta), 1e-12))
+            if abs(proposed_value) > max_log_deviation:
+                target = np.copysign(max_log_deviation, delta if delta else proposed_value)
+                scale = min(scale, max(0.0, (target - before_value) / delta) if delta else 0.0)
+        for index in (2, 3):
+            before_value = (before[index] - prior[index]).item()
+            proposed_value = (proposed[index] - prior[index]).item()
+            delta = proposed_value - before_value
+            if not np.isfinite(proposed_value) or abs(delta) > max_pp_step:
+                scale = min(scale, max_pp_step / max(abs(delta), 1e-12))
+            if abs(proposed_value) > max_pp_deviation:
+                target = np.copysign(max_pp_deviation, delta if delta else proposed_value)
+                scale = min(scale, max(0.0, (target - before_value) / delta) if delta else 0.0)
+        return float(np.clip(scale, 0.0, 1.0))
+
+    def _full_intrinsics_observability(self, target, weight, ii, jj, intrinsics):
+        """Autograd Hessian diagonals for log-focal and principal-point updates."""
+        with torch.enable_grad(), torch.amp.autocast("cuda", enabled=False):
+            current = intrinsics.detach().clone()
+            delta = torch.zeros(4, device=self.device, dtype=torch.float32, requires_grad=True)
+            candidate = current.clone()
+            candidate[0] = current[0] * torch.exp(delta[0])
+            candidate[1] = current[1] * torch.exp(delta[1])
+            candidate[2] = current[2] + delta[2]
+            candidate[3] = current[3] + delta[3]
+            loss, support = self._focal_data_loss(target, weight, ii, jj, candidate)
+            gradient = torch.autograd.grad(loss, delta, create_graph=True)[0]
+            hessian_diag = torch.stack([
+                torch.autograd.grad(gradient[index], delta, retain_graph=index < 3)[0][index]
+                for index in range(4)
+            ])
+        return loss.detach(), support.detach(), hessian_diag.detach()
+
+    def _full_intrinsics_objective(self, target, weight, ii, jj, intrinsics):
+        loss, support = self._focal_data_loss(target, weight, ii, jj, intrinsics)
+        prior = self._intrinsics_prior.to(intrinsics.device)
+        pp_cfg = self.focal_calibration_cfg.get("principal_point", {}) or {}
+        pp_scale = float(pp_cfg.get("max_deviation", 1.50))
+        focal_penalty = 0.05 * torch.log((intrinsics[:2] / prior[:2]).clamp_min(1e-6)).square().sum()
+        principal_penalty = float(pp_cfg.get("prior_weight", 0.05)) * ((intrinsics[2:] - prior[2:]) / max(pp_scale, 1e-6)).square().sum()
+        return loss + focal_penalty + principal_penalty, support
 
     def _focal_base_pose_update(self, poses_before, t0, t1):
         """Summarize the ordinary BA pose change before allowing a focal update."""
@@ -2715,10 +3044,6 @@ class DepthVideo:
         os.makedirs(f"{self.output}/intermediate_results", exist_ok=True)
         dino_feats_similarity_reproj_vis = plt.get_cmap('viridis')(dino_feats_similarity_reproj)
         Image.fromarray((dino_feats_similarity_reproj_vis * 255.0).astype(np.uint8)).save(f"{self.output}/intermediate_results/dino_feats_similarity_reproj_{i:03d}_vs_{j:03d}.png")
-
-        """
-        # visualize high-dimensional features using PCA projection
-        """
 
         def visualize_dino_feature_pca(features, save_path=None, scale_each=False):
             """

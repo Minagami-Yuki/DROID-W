@@ -1,0 +1,14 @@
+{
+  "description": "Omega K used by the canonical Bonn confidence-recovery runs",
+  "protocol": "12 early RGB frames, stride 5, per-parameter median",
+  "intrinsics": {
+    "balloon": {"fx": 556.018433, "fy": 555.878357, "cx": 320.0, "cy": 240.0},
+    "balloon2": {"fx": 557.970947, "fy": 557.744873, "cx": 320.0, "cy": 240.0},
+    "crowd": {"fx": 571.946045, "fy": 570.342041, "cx": 320.0, "cy": 240.0},
+    "crowd2": {"fx": 567.059204, "fy": 566.406799, "cx": 320.0, "cy": 240.0},
+    "moving_nonobstructing_box": {"fx": 589.108093, "fy": 585.238647, "cx": 320.0, "cy": 240.0},
+    "moving_nonobstructing_box2": {"fx": 579.016174, "fy": 574.520203, "cx": 320.0, "cy": 240.0},
+    "person_tracking": {"fx": 548.092468, "fy": 547.262939, "cx": 320.0, "cy": 240.0},
+    "person_tracking2": {"fx": 562.714294, "fy": 562.099060, "cx": 320.0, "cy": 240.0}
+  }
+}

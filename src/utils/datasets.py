@@ -652,6 +652,7 @@ class Dycheck(BaseDataset):
 dataset_dict = {
     "tumrgbd": TUM_RGBD,
     "bonn_dynamic": TUM_RGBD,
+    "wild_slam_mocap": TUM_RGBD,
     "7scenes": SevenScenes,
     "youtube": RGB_NoPose,
     "dycheck": Dycheck,
